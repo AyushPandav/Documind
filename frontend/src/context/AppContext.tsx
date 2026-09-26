@@ -116,7 +116,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const pickAndUploadDocument = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg'],
+        type: '*/*',
+        multiple: true,
         copyToCacheDirectory: true,
       });
 
@@ -124,62 +125,80 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const asset = result.assets[0];
-      const fileName = asset.name || 'uploaded_document.pdf';
-      const fileSize = asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.4 MB';
-      const mimeType = asset.mimeType || 'application/pdf';
-
-      const newDocId = `doc-${Date.now()}`;
-      const newDoc: DocumentItem = {
-        id: newDocId,
-        name: fileName,
-        uri: asset.uri,
-        size: fileSize,
-        pages: Math.floor(Math.random() * 25) + 5,
-        status: 'QUEUED',
-        progress: 15,
-        uploadedAt: 'Just now',
-      };
-
-      // Add to document list immediately
-      setDocuments((prev) => [newDoc, ...prev]);
+      const totalFiles = result.assets.length;
       setIsUploading(true);
-      setUploadingDocName(fileName);
-      setUploadProgress(20);
+      setUploadingDocName(totalFiles > 1 ? `${totalFiles} documents` : (result.assets[0].name || 'document'));
+      setUploadProgress(15);
 
-      // Attempt live upload to FastAPI backend if available
-      uploadDocumentToBackend(asset.uri, fileName, mimeType).catch((e) =>
-        console.log('Background upload to backend:', e)
-      );
+      const newDocs: DocumentItem[] = [];
 
-      // Advance through OCR step
+      for (let i = 0; i < result.assets.length; i++) {
+        const asset = result.assets[i];
+        const fileName = asset.name || `uploaded_doc_${i + 1}`;
+        const fileSize = asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.2 MB';
+        const mimeType = asset.mimeType || 'application/octet-stream';
+        const docId = `doc-${Date.now()}-${i}`;
+
+        // Estimate pages based on extension
+        const ext = fileName.split('.').pop()?.toLowerCase();
+        let estimatedPages = 1;
+        if (ext === 'pdf') {
+          estimatedPages = Math.floor(Math.random() * 20) + 3;
+        } else if (ext === 'docx' || ext === 'doc') {
+          estimatedPages = Math.floor(Math.random() * 8) + 2;
+        } else if (ext === 'pptx' || ext === 'ppt') {
+          estimatedPages = Math.floor(Math.random() * 12) + 4;
+        }
+
+        const newDoc: DocumentItem = {
+          id: docId,
+          name: fileName,
+          uri: asset.uri,
+          size: fileSize,
+          pages: estimatedPages,
+          status: 'QUEUED',
+          progress: 20,
+          uploadedAt: 'Just now',
+        };
+
+        newDocs.push(newDoc);
+
+        // Upload to live backend asynchronously
+        uploadDocumentToBackend(asset.uri, fileName, mimeType)
+          .then((backendDoc) => {
+            if (backendDoc) {
+              setDocuments((prev) =>
+                prev.map((d) => (d.id === docId ? { ...d, id: backendDoc.id, status: 'INDEXED', progress: 100 } : d))
+              );
+            }
+          })
+          .catch((e) => console.log(`[DocuMind] Background upload for ${fileName}:`, e));
+      }
+
+      // Add all new documents to list immediately
+      setDocuments((prev) => [...newDocs, ...prev]);
+      if (newDocs.length > 0) {
+        setSelectedDocument(newDocs[0]);
+      }
+
+      // Progress animation
       setTimeout(() => {
-        setUploadProgress(45);
+        setUploadProgress(50);
         setDocuments((prev) =>
-          prev.map((d) => (d.id === newDocId ? { ...d, status: 'OCR', progress: 45 } : d))
+          prev.map((d) => (newDocs.some((nd) => nd.id === d.id) ? { ...d, status: 'PROCESSING', progress: 50 } : d))
         );
-      }, 700);
+      }, 800);
 
-      // Advance through PROCESSING step
-      setTimeout(() => {
-        setUploadProgress(80);
-        setDocuments((prev) =>
-          prev.map((d) => (d.id === newDocId ? { ...d, status: 'PROCESSING', progress: 80 } : d))
-        );
-      }, 1500);
-
-      // Complete to INDEXED step
       setTimeout(() => {
         setUploadProgress(100);
         setIsUploading(false);
         setUploadingDocName(null);
         setDocuments((prev) =>
-          prev.map((d) => (d.id === newDocId ? { ...d, status: 'INDEXED', progress: 100 } : d))
+          prev.map((d) => (newDocs.some((nd) => nd.id === d.id) ? { ...d, status: 'INDEXED', progress: 100 } : d))
         );
-        setSelectedDocument(newDoc);
-      }, 2300);
+      }, 1800);
     } catch (err) {
-      console.error('Error selecting document:', err);
+      console.error('Error selecting documents:', err);
       setIsUploading(false);
       setUploadingDocName(null);
     }
@@ -263,33 +282,74 @@ export function AppProvider({ children }: { children: ReactNode }) {
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
       } else {
+        // Check if asking for document description / summary
+        const isDescQuery =
+          lower.includes('what is') ||
+          lower.includes('about') ||
+          lower.includes('describe') ||
+          lower.includes('description') ||
+          lower.includes('summarize') ||
+          lower.includes('summary') ||
+          lower.includes('overview') ||
+          lower.includes('explain');
+
         const targetDocName = selectedDocument ? selectedDocument.name : 'company_policy.pdf';
-        assistantMessage = {
-          id: `msg-resp-${Date.now()}`,
-          role: 'assistant',
-          content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          citations: [
-            {
-              id: `cite-${Date.now()}-1`,
-              index: 1,
-              documentId: selectedDocument?.id || 'doc-2',
-              documentName: targetDocName,
-              page: 15,
-              snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
-              relevance: 91,
-            },
-            {
-              id: `cite-${Date.now()}-2`,
-              index: 2,
-              documentId: selectedDocument?.id || 'doc-2',
-              documentName: targetDocName,
-              page: 19,
-              snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
-              relevance: 84,
-            },
-          ],
-        };
+
+        if (isDescQuery) {
+          assistantMessage = {
+            id: `msg-resp-${Date.now()}`,
+            role: 'assistant',
+            content: `This document, "${targetDocName}," serves as an authoritative guide covering key policies, procedures, and architectural standards [1]. It details implementation specifications, compliance obligations, and operational workflows designed to ensure seamless system execution [2].\n\nKey areas include core procedural requirements, security governance, and operational auditing protocols.`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            citations: [
+              {
+                id: `cite-${Date.now()}-1`,
+                index: 1,
+                documentId: selectedDocument?.id || 'doc-1',
+                documentName: targetDocName,
+                page: 1,
+                snippet: `Overview and general purpose of ${targetDocName}: Outlines the foundational architecture and guidelines.`,
+                relevance: 95,
+              },
+              {
+                id: `cite-${Date.now()}-2`,
+                index: 2,
+                documentId: selectedDocument?.id || 'doc-1',
+                documentName: targetDocName,
+                page: 3,
+                snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                relevance: 90,
+              },
+            ],
+          };
+        } else {
+          assistantMessage = {
+            id: `msg-resp-${Date.now()}`,
+            role: 'assistant',
+            content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            citations: [
+              {
+                id: `cite-${Date.now()}-1`,
+                index: 1,
+                documentId: selectedDocument?.id || 'doc-2',
+                documentName: targetDocName,
+                page: 15,
+                snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                relevance: 91,
+              },
+              {
+                id: `cite-${Date.now()}-2`,
+                index: 2,
+                documentId: selectedDocument?.id || 'doc-2',
+                documentName: targetDocName,
+                page: 19,
+                snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
+                relevance: 84,
+              },
+            ],
+          };
+        }
       }
 
       setMessages((prev) => [...prev, assistantMessage]);

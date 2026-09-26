@@ -27,14 +27,24 @@ class Settings(SettingsBase):
     
     # Cloud Storage (NeonDB PostgreSQL + pgvector)
     NEON_DATABASE_URL: str = os.getenv("NEON_DATABASE_URL", "")
-    ENABLE_CLOUD_SYNC: bool = False
+    ENABLE_CLOUD_SYNC: bool = os.getenv("ENABLE_CLOUD_SYNC", "False").lower() in ("true", "1", "yes")
     
-    # Cloud LLMs
-    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
-    MISTRAL_MODEL: str = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+    # Authentication & Security (JWT)
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "documind_jwt_secret_2026_prod_fhe_rag_secure")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+    
+    # PRIMARY LOCAL LLM: Ollama (Qwen 2.5 3B-Instruct)
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
+    # FALLBACK-1: Groq API (High-speed cloud inference)
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    
+    # FALLBACK-2: Mistral API
+    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+    MISTRAL_MODEL: str = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
     
     # Embeddings & RAG
     EMBEDDING_DIM: int = 384

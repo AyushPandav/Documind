@@ -1,4 +1,6 @@
 import logging
+import sys
+import io
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,14 +12,29 @@ from app.db.sqlite_cache import (
     save_chunks
 )
 from app.rag.embeddings import embedding_service
-from app.routers import documents, chat, fhe
+from app.routers import documents, chat, fhe, auth
+from app.auth.neon_users import ensure_users_table
 
-# Configure logging
+# Force UTF-8 output on Windows to prevent CP1252 UnicodeEncodeErrors
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+# ─── Logging Configuration ────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+                             if hasattr(sys.stdout, 'buffer') else sys.stdout)
+    ]
 )
 logger = logging.getLogger("DocuMind.Gateway")
+
 
 async def seed_initial_demo_corpus():
     """
@@ -26,13 +43,15 @@ async def seed_initial_demo_corpus():
     """
     existing_docs = await get_all_documents()
     if existing_docs:
+        logger.info(f"[Seed] Database already has {len(existing_docs)} document(s) — skipping demo seed")
         return
 
-    logger.info("Database empty. Seeding realistic DocuMind demo corpus...")
+    logger.info("[Seed] Database empty. Seeding DocuMind demo corpus with 2 realistic documents...")
 
-    # Document 1: company_policy.pdf
+    # ── Document 1: company_policy.pdf ───────────────────────────────────────
     doc1_id = "doc-policy"
     doc1_name = "company_policy.pdf"
+    logger.info(f"[Seed] Seeding '{doc1_name}'...")
     await save_document(
         doc_id=doc1_id,
         name=doc1_name,
@@ -70,13 +89,16 @@ async def seed_initial_demo_corpus():
         }
     ]
 
+    logger.info(f"[Seed] Embedding {len(doc1_chunks)} chunks for '{doc1_name}'...")
     for c in doc1_chunks:
         c["embedding"] = embedding_service.embed_text(c["content"])
     await save_chunks(doc1_chunks)
+    logger.info(f"[Seed] ✓ '{doc1_name}' seeded ({len(doc1_chunks)} chunks)")
 
-    # Document 2: employee_handbook.pdf
+    # ── Document 2: employee_handbook.pdf ────────────────────────────────────
     doc2_id = "doc-handbook"
     doc2_name = "employee_handbook.pdf"
+    logger.info(f"[Seed] Seeding '{doc2_name}'...")
     await save_document(
         doc_id=doc2_id,
         name=doc2_name,
@@ -122,31 +144,72 @@ async def seed_initial_demo_corpus():
         }
     ]
 
+    logger.info(f"[Seed] Embedding {len(doc2_chunks)} chunks for '{doc2_name}'...")
     for c in doc2_chunks:
         c["embedding"] = embedding_service.embed_text(c["content"])
     await save_chunks(doc2_chunks)
+    logger.info(f"[Seed] ✓ '{doc2_name}' seeded ({len(doc2_chunks)} chunks)")
 
-    logger.info("Initial demo corpus successfully seeded.")
+    logger.info("[Seed] >> Demo corpus seeded successfully (2 documents, 7 total chunks)")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize SQLite tables & seed corpus
+    # ── STARTUP ───────────────────────────────────────────────────────────────
+    logger.info("═" * 65)
+    logger.info(f"  DocuMind Gateway — v{settings.VERSION}")
+    logger.info(f"  FastAPI Backend: Production-Grade RAG + FHE Engine")
+    logger.info("═" * 65)
+    logger.info(f"[Startup] Initializing SQLite database at: {settings.SQLITE_DB_PATH}")
     await init_sqlite_db()
+    logger.info(f"[Startup] ✓ SQLite schema initialized (5 tables)")
+
+    logger.info(f"[Startup] Seeding demo corpus if needed...")
     await seed_initial_demo_corpus()
-    logger.info(f"DocuMind Gateway online on port {settings.PORT}.")
+
+    logger.info(f"[Startup] Upload directory: {settings.UPLOAD_DIR}")
+    logger.info(f"[Startup] Embedding model: {'SentenceTransformer all-MiniLM-L6-v2' if embedding_service._model else 'Deterministic Projection (384d)'}")
+    logger.info(f"[Startup] Cloud sync: {'Enabled → NeonDB' if settings.ENABLE_CLOUD_SYNC else 'Disabled'}")
+    
+    # ── Initialize Auth Schema (NeonDB PostgreSQL + Local SQLite fallback) ────
+    logger.info(f"[Startup] Initializing Authentication layer...")
+    neon_auth_ok = await ensure_users_table()
+    auth_provider_str = "NeonDB Serverless PostgreSQL ✓" if neon_auth_ok else "Local SQLite (Offline fallback)"
+    logger.info(f"[Startup] Auth provider: {auth_provider_str}")
+
+    logger.info(f"[Startup] LLM Primary: Ollama ({settings.OLLAMA_MODEL}) at {settings.OLLAMA_BASE_URL}")
+    logger.info(f"[Startup] LLM Fallback-1: Groq ({settings.GROQ_MODEL}) ✓")
+    logger.info(f"[Startup] LLM Fallback-2: Mistral ({settings.MISTRAL_MODEL}) ✓")
+    logger.info("═" * 65)
+    logger.info(f"[Startup] ✅ DocuMind Gateway ONLINE — http://{settings.HOST}:{settings.PORT}")
+    logger.info(f"[Startup]    API Docs: http://localhost:{settings.PORT}/docs")
+    logger.info(f"[Startup]    ReDoc:    http://localhost:{settings.PORT}/redoc")
+    logger.info("═" * 65)
+
     yield
-    # Shutdown
-    logger.info("DocuMind Gateway shutting down.")
+
+    # ── SHUTDOWN ──────────────────────────────────────────────────────────────
+    logger.info("═" * 65)
+    logger.info("[Shutdown] DocuMind Gateway shutting down gracefully...")
+    logger.info("═" * 65)
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
+    description=(
+        "DocuMind: Production-Grade FastAPI backend featuring Multi-Pipeline Document Ingestion, "
+        "Self-Reflective Corrective RAG Loop, Hybrid BM25 + Dense Vector Retrieval, "
+        "Fully Homomorphic Encryption (CKKS), Dual LLM Circuit Breaker, "
+        "JWT Authentication backed by NeonDB Serverless PostgreSQL, "
+        "and Offline-First SQLite + NeonDB Cloud Sync."
+    ),
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc"
 )
 
-# CORS Middleware (Allows React Native Expo, Web, and Emulators)
+# ─── CORS Middleware ──────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -155,17 +218,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register Routers
+# ─── Routers ──────────────────────────────────────────────────────────────────
+app.include_router(auth.router)
 app.include_router(documents.router)
 app.include_router(chat.router)
 app.include_router(fhe.router)
 
-@app.get("/health")
+
+@app.get("/health", tags=["System"])
 async def health_check():
+    """System health check — returns service status, capabilities, and config."""
     return {
         "status": "healthy",
         "service": settings.PROJECT_NAME,
         "version": settings.VERSION,
-        "offline_ready": True,
-        "fhe_enabled": True
+        "features": {
+            "authentication_jwt": True,
+            "multi_pipeline_ingestion": True,
+            "hybrid_rag_retrieval": True,
+            "self_reflective_loop": True,
+            "fhe_zero_knowledge_search": True,
+            "offline_ready": True,
+            "multi_file_upload": True,
+            "document_relatedness_analysis": True,
+        },
+        "auth": {
+            "enabled": True,
+            "provider": "NeonDB Serverless PostgreSQL" if settings.NEON_DATABASE_URL else "SQLite Local",
+            "token_type": "Bearer JWT",
+            "expiry_minutes": settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        },
+        "llm_config": {
+            "primary": f"Ollama ({settings.OLLAMA_MODEL})",
+            "fallback_1": f"Groq ({settings.GROQ_MODEL})",
+            "fallback_2": f"Mistral ({settings.MISTRAL_MODEL})",
+            "offline": "Deterministic Heuristic Synthesizer",
+        },
+        "embedding": {
+            "model": "all-MiniLM-L6-v2" if embedding_service._model else "Deterministic Projection",
+            "dimension": settings.EMBEDDING_DIM
+        },
+        "cloud_sync": settings.ENABLE_CLOUD_SYNC,
     }

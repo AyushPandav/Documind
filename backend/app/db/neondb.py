@@ -24,10 +24,19 @@ class NeonCloudDB:
         self.total_synced_chunks = 0
 
     def _normalize_pg_url(self, url: str) -> str:
-        """Converts postgres:// or postgresql:// to asyncpg compatible string."""
+        """Converts postgres:// to postgresql:// and removes unsupported asyncpg params like channel_binding."""
+        if not url:
+            return ""
         if url.startswith("postgres://"):
-            return "postgresql://" + url[len("postgres://"):]
-        return url
+            url = "postgresql://" + url[len("postgres://"):]
+        try:
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            p = urlparse(url)
+            q = parse_qs(p.query)
+            q.pop("channel_binding", None)
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q, doseq=True), p.fragment))
+        except Exception:
+            return url
 
     async def check_connection(self) -> bool:
         if not self.database_url:

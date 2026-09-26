@@ -1,21 +1,42 @@
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+import * as FileSystem from 'expo-file-system/legacy';
 import { DocumentItem, ChatMessage, CitationSource } from '@/types';
 
-// Determine default host: 10.0.2.2 for Android emulator, localhost for iOS simulator & web
+// Determine default host:
+// 1. Check EXPO_PUBLIC_API_URL
+// 2. On physical device, resolve the developer machine's LAN IP from Metro (e.g. 192.168.x.x)
+// 3. Fallback to 10.0.2.2 for Android emulator, localhost for iOS simulator & web
 const getDefaultApiHost = () => {
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    return process.env.EXPO_PUBLIC_API_URL;
+  }
+
+  // Extract host IP from Expo Constants (works on physical Android/iOS devices)
+  const hostUri =
+    Constants.expoConfig?.hostUri ||
+    (Constants as any).manifest?.debuggerHost ||
+    (Constants as any).manifest2?.extra?.expoGo?.debuggerHost;
+
+  if (hostUri) {
+    const ip = hostUri.split(':')[0];
+    if (ip && ip !== 'localhost' && ip !== '127.0.0.1') {
+      return `http://${ip}:8000`;
+    }
+  }
+
   if (Platform.OS === 'android') {
     return 'http://10.0.2.2:8000';
   }
   return 'http://localhost:8000';
 };
 
-export const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL || getDefaultApiHost();
+export const API_BASE_URL = getDefaultApiHost();
 
 export async function checkBackendHealth(): Promise<boolean> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
     const res = await fetch(`${API_BASE_URL}/health`, {
       signal: controller.signal,
     });
@@ -47,43 +68,140 @@ export async function fetchBackendDocuments(): Promise<DocumentItem[] | null> {
   }
 }
 
+/**
+ * Uploads a single document to the FastAPI backend.
+ * Uses native FileSystem.uploadAsync on mobile (Android/iOS) to prevent
+ * "Unsupported FormDataPart implementation" errors with WinterCG fetch.
+ * Uses fetch + Blob on Web.
+ */
 export async function uploadDocumentToBackend(
   fileUri: string,
   fileName: string,
-  fileType: string = 'application/pdf'
+  fileType: string = 'application/octet-stream'
 ): Promise<DocumentItem | null> {
   try {
-    const formData = new FormData();
-    // React Native FormData format
-    formData.append('file', {
-      uri: fileUri,
-      name: fileName,
-      type: fileType,
-    } as any);
+    const uploadUrl = `${API_BASE_URL}/api/documents/upload`;
+    const base64UploadUrl = `${API_BASE_URL}/api/documents/upload-base64`;
 
-    const res = await fetch(`${API_BASE_URL}/api/documents/upload`, {
+    // ── 1. Native Mobile: Attempt FileSystem.uploadAsync (Native Multipart) ──
+    if (Platform.OS !== 'web' && FileSystem && typeof FileSystem.uploadAsync === 'function') {
+      try {
+        console.log(`[DocuMind API] Uploading ${fileName} via FileSystem.uploadAsync to ${uploadUrl}`);
+        
+        // uploadType 1 is MULTIPART (defined in FileSystemUploadType.MULTIPART)
+        const uploadResult = await FileSystem.uploadAsync(uploadUrl, fileUri, {
+          httpMethod: 'POST',
+          uploadType: 1 as any,
+          fieldName: 'file',
+          mimeType: fileType,
+          parameters: {},
+        });
+
+        if (uploadResult.status >= 200 && uploadResult.status < 300) {
+          const data = JSON.parse(uploadResult.body);
+          console.log(`[DocuMind API] uploadAsync SUCCESS for ${fileName}:`, data.id);
+          return {
+            id: data.id,
+            name: data.name,
+            size: data.size,
+            pages: data.pages || 1,
+            status: data.status,
+            progress: data.progress,
+            uploadedAt: 'Just now',
+          };
+        } else {
+          console.warn(`[DocuMind API] uploadAsync returned status ${uploadResult.status}, trying Base64 fallback...`);
+        }
+      } catch (uploadAsyncErr) {
+        console.warn(`[DocuMind API] uploadAsync error (${uploadAsyncErr}), switching to Base64 JSON fallback...`);
+      }
+
+      // ── 2. Native Mobile Fail-safe: Base64 JSON Upload (100% reliable) ──
+      try {
+        console.log(`[DocuMind API] Uploading ${fileName} via Base64 JSON to ${base64UploadUrl}`);
+        const base64Data = await FileSystem.readAsStringAsync(fileUri, {
+          encoding: 'base64' as any,
+        });
+
+        const b64Res = await fetch(base64UploadUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            filename: fileName,
+            file_base64: base64Data,
+            mime_type: fileType,
+          }),
+        });
+
+        if (b64Res.ok) {
+          const data = await b64Res.json();
+          console.log(`[DocuMind API] Base64 upload SUCCESS for ${fileName}:`, data.id);
+          return {
+            id: data.id,
+            name: data.name,
+            size: data.size,
+            pages: data.pages || 1,
+            status: data.status,
+            progress: data.progress,
+            uploadedAt: 'Just now',
+          };
+        } else {
+          const errText = await b64Res.text();
+          console.warn(`[DocuMind API] Base64 upload HTTP ${b64Res.status}:`, errText);
+        }
+      } catch (b64Err) {
+        console.warn(`[DocuMind API] Base64 upload error:`, b64Err);
+      }
+    }
+
+    // ── 3. Fallback / Web: Fetch Blob and append to standard FormData ──
+    console.log(`[DocuMind API] Uploading ${fileName} via Web FormData fallback to ${uploadUrl}`);
+    const localRes = await fetch(fileUri);
+    const blob = await localRes.blob();
+
+    const formData = new FormData();
+    formData.append('file', blob, fileName);
+
+    const res = await fetch(uploadUrl, {
       method: 'POST',
       body: formData,
-      headers: {
-        'Accept': 'application/json',
-      },
     });
 
-    if (!res.ok) return null;
-    const data = await res.json();
-    return {
-      id: data.id,
-      name: data.name,
-      size: data.size,
-      pages: 1,
-      status: data.status,
-      progress: data.progress,
-      uploadedAt: 'Just now',
-    };
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        id: data.id,
+        name: data.name,
+        size: data.size,
+        pages: data.pages || 1,
+        status: data.status,
+        progress: data.progress,
+        uploadedAt: 'Just now',
+      };
+    } else {
+      const errText = await res.text();
+      console.warn(`[DocuMind API] FormData upload HTTP ${res.status}:`, errText);
+      return null;
+    }
   } catch (err) {
     console.log('[DocuMind API] Upload to backend error:', err);
     return null;
   }
+}
+
+/**
+ * Uploads multiple documents concurrently to the backend.
+ */
+export async function uploadBatchDocumentsToBackend(
+  files: Array<{ uri: string; name: string; type?: string }>
+): Promise<DocumentItem[]> {
+  const uploadPromises = files.map((f) =>
+    uploadDocumentToBackend(f.uri, f.name, f.type || 'application/octet-stream')
+  );
+  const results = await Promise.all(uploadPromises);
+  return results.filter((d): d is DocumentItem => d !== null);
 }
 
 export interface QueryBackendResult {
@@ -138,8 +256,9 @@ export async function sendQueryToBackend(
 
 export async function performFheSearch(
   query: string,
-  docFilter?: string | null
-): Promise<any> {
+  docFilter?: string | null,
+  topK: number = 3
+): Promise<any | null> {
   try {
     // 1. Client encryption simulation
     const encRes = await fetch(`${API_BASE_URL}/api/fhe/encrypt-query`, {
@@ -147,6 +266,7 @@ export async function performFheSearch(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
     });
+    if (!encRes.ok) return null;
     const encData = await encRes.json();
 
     // 2. Homomorphic search on server
@@ -155,13 +275,15 @@ export async function performFheSearch(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         encrypted_query: encData.encrypted_ciphertext,
-        doc_filter: docFilter,
-        top_k: 3,
+        doc_filter: docFilter || null,
+        top_k: topK,
       }),
     });
+
+    if (!searchRes.ok) return null;
     return await searchRes.json();
   } catch (err) {
-    console.log('[DocuMind API] FHE Search error:', err);
+    console.log('[DocuMind API] FHE search offline:', err);
     return null;
   }
 }

@@ -1,4 +1,5 @@
 import httpx
+import time
 import logging
 from typing import List, Dict, Any, Optional
 from app.config import settings
@@ -7,20 +8,137 @@ logger = logging.getLogger("DocuMind.CircuitBreaker")
 
 DOCUMIND_SYSTEM_PROMPT = (
     "You are DocuMind, an elite AI Document Intelligence Engine. "
-    "Answer strictly using the provided context chunks. "
+    "Answer using the provided context chunks. "
     "Cite your sources using bracketed notation like [1], [2] referencing the numbered context items. "
-    "If the context does not contain sufficient facts to answer the question, state: "
-    "'The uploaded documents do not contain sufficient evidence to answer this.'"
+    "If the user asks what the document is about, summarize it, or asks for an overview or description, "
+    "provide a comprehensive, well-structured description of the document's topics, key takeaways, and core purpose. "
+    "If the context does not explicitly mention the exact specific detail asked, explain what the document covers instead based on the available evidence, with citations."
 )
+
+
+async def call_ollama_api(prompt: str, context_chunks: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    PRIMARY LLM: Local Ollama (Qwen 2.5 3B-Instruct).
+    Ultra-low latency, zero external API costs, private on-device generation.
+    """
+    url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    logger.info(f"[CircuitBreaker] 🔷 Attempting PRIMARY: Ollama ({settings.OLLAMA_MODEL}) at {url}...")
+    t_start = time.monotonic()
+
+    try:
+        payload = {
+            "model": settings.OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": DOCUMIND_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "num_predict": 1024
+            }
+        }
+        timeout_cfg = httpx.Timeout(60.0, connect=3.0)
+        async with httpx.AsyncClient(timeout=timeout_cfg) as client:
+            resp = await client.post(url, json=payload)
+            elapsed = time.monotonic() - t_start
+
+            if resp.status_code == 200:
+                data = resp.json()
+                answer = data.get("message", {}).get("content", "").strip()
+                if answer:
+                    logger.info(f"[CircuitBreaker] ✅ Ollama SUCCESS ({settings.OLLAMA_MODEL}) — {elapsed:.2f}s | chars: {len(answer)}")
+                    return answer
+            else:
+                logger.warning(f"[CircuitBreaker] ✗ Ollama HTTP {resp.status_code} in {elapsed:.2f}s: {resp.text[:180]}")
+
+    except httpx.ConnectError:
+        elapsed = time.monotonic() - t_start
+        logger.info(f"[CircuitBreaker] ⚠ Ollama not running at {settings.OLLAMA_BASE_URL} ({elapsed:.2f}s) — switching to Fallback-1 (Groq)")
+    except httpx.TimeoutException:
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Ollama TIMEOUT after {elapsed:.2f}s — switching to Fallback-1 (Groq)")
+    except Exception as e:
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Ollama ERROR in {elapsed:.2f}s: {e}")
+
+    return None
+
+
+async def call_groq_api(prompt: str, context_chunks: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    FALLBACK-1: High-speed cloud inference via Groq API.
+    Activated when local Ollama is offline or times out.
+    """
+    if not settings.GROQ_API_KEY:
+        logger.info("[CircuitBreaker] Groq API key not configured — skipping Groq fallback")
+        return None
+
+    logger.info(f"[CircuitBreaker] 🔶 Attempting FALLBACK-1: Groq ({settings.GROQ_MODEL})...")
+    t_start = time.monotonic()
+
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": settings.GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": DOCUMIND_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1024
+        }
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            elapsed = time.monotonic() - t_start
+
+            if resp.status_code == 200:
+                data = resp.json()
+                answer = data["choices"][0]["message"]["content"].strip()
+                usage = data.get("usage", {})
+                logger.info(
+                    f"[CircuitBreaker] ✅ Groq SUCCESS — "
+                    f"{elapsed:.2f}s | "
+                    f"tokens: {usage.get('total_tokens', '?')} "
+                    f"(prompt={usage.get('prompt_tokens', '?')}, "
+                    f"completion={usage.get('completion_tokens', '?')})"
+                )
+                return answer
+            else:
+                logger.warning(
+                    f"[CircuitBreaker] ✗ Groq HTTP {resp.status_code} in {elapsed:.2f}s: "
+                    f"{resp.text[:200]}"
+                )
+
+    except httpx.TimeoutException:
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Groq TIMEOUT after {elapsed:.2f}s — falling back")
+    except httpx.ConnectError as e:
+        logger.warning(f"[CircuitBreaker] ✗ Groq CONNECTION ERROR: {e} — falling back")
+    except Exception as e:
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Groq ERROR in {elapsed:.2f}s: {e}")
+
+    return None
+
 
 async def call_mistral_api(prompt: str, context_chunks: List[Dict[str, Any]]) -> Optional[str]:
     """
-    PRIMARY LLM: Mistral Large via Mistral API.
-    Used as the main inference engine for all DocuMind RAG responses.
+    FALLBACK-2: Mistral API.
+    Activated when both Ollama and Groq are unavailable.
     """
     if not settings.MISTRAL_API_KEY:
-        logger.info("Mistral API key not configured, skipping primary LLM.")
+        logger.info("[CircuitBreaker] Mistral API key not configured — skipping Mistral fallback")
         return None
+
+    logger.info(f"[CircuitBreaker] 🔷 Attempting FALLBACK-2: Mistral ({settings.MISTRAL_MODEL})...")
+    t_start = time.monotonic()
+
     try:
         url = "https://api.mistral.ai/v1/chat/completions"
         headers = {
@@ -38,64 +156,55 @@ async def call_mistral_api(prompt: str, context_chunks: List[Dict[str, Any]]) ->
         }
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
+            elapsed = time.monotonic() - t_start
+
             if resp.status_code == 200:
                 data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
+                answer = data["choices"][0]["message"]["content"].strip()
+                usage = data.get("usage", {})
+                logger.info(
+                    f"[CircuitBreaker] ✅ Mistral SUCCESS — "
+                    f"{elapsed:.2f}s | "
+                    f"tokens: {usage.get('total_tokens', '?')}"
+                )
+                return answer
             else:
-                logger.warning(f"Mistral API returned status {resp.status_code}: {resp.text[:200]}")
+                logger.warning(
+                    f"[CircuitBreaker] ✗ Mistral HTTP {resp.status_code} in {elapsed:.2f}s: "
+                    f"{resp.text[:200]}"
+                )
+
+    except httpx.TimeoutException:
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Mistral TIMEOUT after {elapsed:.2f}s — falling back")
     except Exception as e:
-        logger.warning(f"Mistral API call failed: {e}")
+        elapsed = time.monotonic() - t_start
+        logger.warning(f"[CircuitBreaker] ✗ Mistral ERROR in {elapsed:.2f}s: {e}")
+
     return None
 
-async def call_groq_api(prompt: str, context_chunks: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    FALLBACK LLM: High-speed Cloud Inference via Groq API.
-    Activated only when Mistral API is unavailable or times out.
-    """
-    if not settings.GROQ_API_KEY:
-        return None
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": settings.GROQ_MODEL,
-            "messages": [
-                {"role": "system", "content": DOCUMIND_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.1,
-            "max_tokens": 800
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.warning(f"Groq API fallback failed: {e}")
-    return None
 
 def offline_heuristic_synthesizer(query: str, chunks: List[Dict[str, Any]]) -> str:
     """
-    Final Fallback: Deterministic Document Synthesis Engine.
-    When internet is disconnected and no cloud LLM is reachable, DocuMind still
+    FALLBACK-3 (Offline): Deterministic Document Synthesis Engine.
+    When internet is disconnected and no LLM is reachable, DocuMind still
     synthesizes an accurate, citation-grounded response directly from top chunk sentences.
     """
-    if not chunks:
-        return "I couldn't find enough information in the uploaded documents to answer this."
+    logger.info("[CircuitBreaker] 🔴 FALLBACK-3: Offline Heuristic Synthesizer activated (no LLM/internet)")
 
-    # Extract most relevant sentences from top chunks
+    if not chunks:
+        return "No document text is available yet. Please upload a document to get an analysis and description."
+
+    summary_triggers = ["what is", "about", "describe", "description", "summary", "overview", "explain", "tell me"]
+    is_desc = any(st in query.lower() for st in summary_triggers)
+
     query_words = set(query.lower().split())
     answer_sentences = []
-    
-    for idx, c in enumerate(chunks[:2]):
+
+    for idx, c in enumerate(chunks[:3]):
         citation_num = idx + 1
         sentences = [s.strip() for s in c["content"].split(".") if len(s.strip()) > 15]
-        
-        # Rank sentence by query overlap
+
         best_sent = None
         best_score = -1
         for s in sentences:
@@ -108,25 +217,40 @@ def offline_heuristic_synthesizer(query: str, chunks: List[Dict[str, Any]]) -> s
         clean_text = chosen.rstrip(". ")
         answer_sentences.append(f"{clean_text} [{citation_num}].")
 
-    return " ".join(answer_sentences)
+    if is_desc:
+        result = "Based on the uploaded document, here is a description of its key contents:\n\n" + "\n\n".join(answer_sentences)
+    else:
+        result = " ".join(answer_sentences)
+
+    logger.info(f"[CircuitBreaker] ✓ Offline synthesis complete: {len(result)} chars from {len(chunks[:3])} chunk(s)")
+    return result
+
 
 async def generate_rag_response(prompt: str, context_chunks: List[Dict[str, Any]], raw_query: str) -> Dict[str, Any]:
     """
-    Circuit Breaker Dispatcher:
-    1. PRIMARY:  Mistral Large API
-    2. FALLBACK: Groq API
-    3. OFFLINE:  Deterministic Heuristic Synthesizer
+    Circuit Breaker Dispatcher (4-tier failover):
+    1. PRIMARY:    Ollama (Qwen 2.5 3B-Instruct) (local, private, on-device)
+    2. FALLBACK-1: Groq API                      (high-speed cloud inference)
+    3. FALLBACK-2: Mistral API                   (cloud reasoning LLM)
+    4. FALLBACK-3: Offline Semantic Synthesizer  (zero internet requirement)
     """
-    # 1. Primary: Mistral Large
-    res = await call_mistral_api(prompt, context_chunks)
-    if res:
-        return {"response": res, "model": f"Mistral ({settings.MISTRAL_MODEL})"}
+    logger.info(f"[CircuitBreaker] ▶ Dispatching RAG response (prompt: {len(prompt)} chars)")
 
-    # 2. Fallback: Groq
+    # Tier 1: Local Ollama (Qwen 2.5 3B-Instruct)
+    res = await call_ollama_api(prompt, context_chunks)
+    if res:
+        return {"response": res, "model": f"Ollama ({settings.OLLAMA_MODEL})"}
+
+    # Tier 2: Groq API
     res = await call_groq_api(prompt, context_chunks)
     if res:
         return {"response": res, "model": f"Groq ({settings.GROQ_MODEL})"}
 
-    # 3. Offline Fallback
+    # Tier 3: Mistral API
+    res = await call_mistral_api(prompt, context_chunks)
+    if res:
+        return {"response": res, "model": f"Mistral ({settings.MISTRAL_MODEL})"}
+
+    # Tier 4: Offline Fallback
     res = offline_heuristic_synthesizer(raw_query, context_chunks)
     return {"response": res, "model": "Offline Semantic Synthesizer"}
