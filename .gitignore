@@ -1,0 +1,59 @@
+# ========================
+# DocuMind - Root .gitignore
+# ========================
+
+# ---------- Python / Backend ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+backend/venv/
+venv/
+.venv/
+env/
+
+# Environment secrets
+.env
+backend/.env
+
+# SQLite database (local offline cache)
+*.db
+backend/app_cache.db
+
+# Uploaded user documents (runtime data)
+backend/uploads/
+
+# ---------- Node / Frontend ----------
+node_modules/
+frontend/node_modules/
+frontend/.expo/
+frontend/dist/
+.expo/
+
+# ---------- OS / Editor ----------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ---------- Logs ----------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---------- Misc ----------
+*.bak
+*.tmp
+*.cache
+.sass-cache/

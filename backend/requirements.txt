@@ -1,0 +1,31 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.8.0
+httpx>=0.27.0
+aiofiles>=24.1.0
+python-multipart>=0.0.9
+
+# Document Extraction & OCR
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+pandas>=2.2.0
+opencv-python-headless>=4.10.0
+rapidocr-onnxruntime>=1.3.0
+
+# Retrieval & Embeddings
+sentence-transformers>=3.0.0
+rank_bm25>=0.2.2
+numpy>=1.26.0
+
+# Storage
+sqlmodel>=0.0.21
+aiosqlite>=0.20.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+
+# Cloud LLM SDKs
+groq>=0.9.0
+mistralai>=1.0.0
+
+# Homomorphic Encryption
+tenseal>=0.3.14
