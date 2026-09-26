@@ -168,35 +168,62 @@ class SelfReflectiveRAGLoop:
                 "conflict_note": None
             }
 
-        # Check if query is asking for document summary / description / overview
-        summary_triggers = [
-            "what is this", "what is the document", "what is the pdf", "what does this",
-            "what is this pdf about", "what is this document about", "about",
-            "summarize", "summary", "overview", "describe", "description",
-            "give description", "give me description", "tell me about", "explain this",
-            "main points", "key takeaways", "what is inside", "contents", "details",
-            "what does it say", "what is it about", "what is", "explain"
-        ]
-        is_summary_query = any(st in query.lower() for st in summary_triggers)
+        import urllib.parse
+        unquoted_doc_filter = urllib.parse.unquote(doc_filter) if doc_filter else None
 
-        # Parse document filter terms
-        filter_terms = [t.strip().lower() for t in doc_filter.split(",") if t.strip()] if doc_filter else []
+        # Parse document filter terms (unquoted + lowercased)
+        filter_terms = []
+        if doc_filter:
+            for raw in [doc_filter, unquoted_doc_filter]:
+                for t in raw.split(","):
+                    clean_t = t.strip().lower()
+                    if clean_t and clean_t not in filter_terms:
+                        filter_terms.append(clean_t)
+
+        # Check if query is asking for a pure document summary / description / overview
+        q_lower = query.strip().lower()
+        pure_summary_phrases = [
+            "what is this document", "what is this pdf", "what does this document say",
+            "what does this pdf say", "what is this file about", "what is this document about",
+            "what is this pdf about", "summarize this document", "summarize this pdf",
+            "summarize the document", "summarize the pdf", "give me a summary",
+            "give a summary", "give description", "describe this document",
+            "describe this pdf", "overview of the document", "overview of the pdf",
+            "what is inside this document", "what does this file contain", "what is this",
+            "summarize", "summary", "overview", "what is it about"
+        ]
+        # Only treat as pure summary if the query closely matches a general overview request
+        # AND does not ask about specific subjects/entities (e.g., "story", "cortex", "interrupt", "table", "author", "price")
+        specific_keywords = [
+            "story", "book", "chapter", "character", "author", "cortex", "arm", "processor",
+            "interrupt", "nvic", "pipeline", "refund", "leave", "vacation", "remote work",
+            "dataset", "metric", "accuracy", "latency", "array", "pointer", "function",
+            "salary", "bonus", "price", "cost", "revenue", "budget", "sheet", "row", "column"
+        ]
+        has_specific_keyword = any(kw in q_lower for kw in specific_keywords)
+        is_pure_summary = any(phrase in q_lower for phrase in pure_summary_phrases) and not has_specific_keyword
 
         # ── Fast-path for Document Overview / Description Queries ────────────
-        if is_summary_query:
+        if is_pure_summary and (filter_terms or len(all_chunks) <= 10):
             logger.info(f"[LoopEngine] 📑 Overview/Description query detected — gathering introductory context")
             target_chunks = all_chunks
             if filter_terms:
-                filtered = [
-                    c for c in all_chunks
-                    if any(
-                        term == c.get("doc_name", "").lower()
-                        or term == c.get("doc_id", "").lower()
-                        or term in c.get("doc_name", "").lower()
-                        or c.get("doc_name", "").lower() in term
+                def _matches_filter(c):
+                    c_name = c.get("doc_name", "").lower()
+                    c_id = c.get("doc_id", "").lower()
+                    c_unq = urllib.parse.unquote(c_name)
+                    return any(
+                        term == c_name
+                        or term == c_id
+                        or term == c_unq
+                        or term in c_name
+                        or term in c_unq
+                        or c_name in term
+                        or c_unq in term
                         for term in filter_terms
                     )
-                ]
+
+                filtered = [c for c in all_chunks if _matches_filter(c)]
                 if filtered:
                     target_chunks = filtered
                 else:
@@ -205,7 +232,7 @@ class SelfReflectiveRAGLoop:
                         from app.db.sqlite_cache import get_all_documents
                         db_docs = await get_all_documents()
                         matching_db = next(
-                            (d for d in db_docs if any(term in d["name"].lower() for term in filter_terms)),
+                            (d for d in db_docs if any(term in d["name"].lower() or term in urllib.parse.unquote(d["name"].lower()) for term in filter_terms)),
                             None
                         )
                         if matching_db and matching_db.get("status") in ["QUEUED", "OCR", "CHUNKING", "EMBEDDING", "PROCESSING"]:
@@ -220,7 +247,6 @@ class SelfReflectiveRAGLoop:
                     except Exception as db_err:
                         logger.warning(f"[LoopEngine] Error checking db doc status: {db_err}")
 
-                    # If not currently indexing, summarize the available document corpus
                     logger.info(f"[LoopEngine] Using available {len(all_chunks)} chunks for description")
                     target_chunks = all_chunks
 
@@ -230,31 +256,47 @@ class SelfReflectiveRAGLoop:
                 for term in filter_terms:
                     doc_chunks = [
                         c for c in target_chunks
-                        if term == c.get("doc_name", "").lower()
-                        or term in c.get("doc_name", "").lower()
-                        or c.get("doc_name", "").lower() in term
+                        if term in c.get("doc_name", "").lower()
+                        or term in urllib.parse.unquote(c.get("doc_name", "").lower())
+                        or term in c.get("doc_id", "").lower()
                     ]
                     doc_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
                     top_chunks_list.extend(doc_chunks[:3])
                 if not top_chunks_list:
                     target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-                    top_chunks_list = target_chunks[:6]
+                    top_chunks_list = target_chunks[:8]
                 top_chunks = top_chunks_list
             else:
-                # Sort by page number and chunk index so we get the beginning of the document
+                # For a single document, sort chronologically and sample up to 8 chunks
                 target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-                top_chunks = target_chunks[:5]
+                if len(target_chunks) <= 8:
+                    top_chunks = target_chunks
+                else:
+                    # Sample first 4, middle 2, and end 2 chunks for complete representation of large PDFs
+                    n_chunks = len(target_chunks)
+                    mid = n_chunks // 2
+                    sampled_indices = [0, 1, 2, 3, mid, mid + 1, n_chunks - 2, n_chunks - 1]
+                    sampled_indices = sorted(list(dict.fromkeys(i for i in sampled_indices if 0 <= i < n_chunks)))
+                    top_chunks = [target_chunks[i] for i in sampled_indices[:8]]
 
             confidence = 0.95
             conflict_note = None
+            is_summary_query = True
 
         else:
+            is_summary_query = False
             # ── Step 1: Query Decomposition ───────────────────────────────────────
             sub_queries = self.decompose_query(query)
             logger.info(f"[LoopEngine] Step 1: {len(sub_queries)} sub-quer{'y' if len(sub_queries) == 1 else 'ies'} identified")
 
             collected_chunks: Dict[str, Dict[str, Any]] = {}
-            retrieval_k = max(4, min(15, len(filter_terms) * 3)) if len(filter_terms) > 1 else 4
+            # For single-doc queries, retrieve more chunks; for multi-doc scale by doc count
+            # Also if corpus is small (e.g. a 31-chunk PDF), retrieve all available chunks
+            if len(filter_terms) > 1:
+                retrieval_k = max(6, min(20, len(filter_terms) * 4))
+            else:
+                corpus_size = len(all_chunks)
+                retrieval_k = corpus_size if corpus_size <= 20 else 8
 
             # ── Step 2: Hybrid Retrieval + Reflection Loop ────────────────────────
             for sq_idx, sq in enumerate(sub_queries):
@@ -308,9 +350,10 @@ class SelfReflectiveRAGLoop:
                     if c["id"] not in selected_ids and len(top_chunks_selected) < 8:
                         top_chunks_selected.append(c)
 
-                top_chunks = top_chunks_selected if top_chunks_selected else final_chunks[:4]
+                top_chunks = top_chunks_selected if top_chunks_selected else final_chunks[:6]
             else:
-                top_chunks = final_chunks[:4]
+                # For single-doc queries use up to 8 top chunks for richer context
+                top_chunks = final_chunks[:8]
 
             if not top_chunks:
                 # Fall back to introductory chunks

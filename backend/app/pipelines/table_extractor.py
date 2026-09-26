@@ -18,8 +18,16 @@ def extract_tables_as_markdown(file_path: str) -> List[Dict[str, Any]]:
             total_pages = len(pdf.pages)
             found_tables = 0
 
-            for page_idx, page in enumerate(pdf.pages):
-                extracted_tables = page.extract_tables()
+            # For very large documents (e.g. 50-200 pages), scan first 30 pages where tables typically reside
+            pages_to_scan = pdf.pages[:30] if total_pages > 30 else pdf.pages
+            if total_pages > 30:
+                logger.info(f"  │  [TableExtractor] Large document ({total_pages} pages) — scanning first 30 pages for tables")
+
+            for page_idx, page in enumerate(pages_to_scan):
+                try:
+                    extracted_tables = page.extract_tables()
+                except Exception:
+                    continue
                 if not extracted_tables:
                     continue
 

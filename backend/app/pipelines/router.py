@@ -71,11 +71,17 @@ def process_document(file_path: str, file_name: str) -> List[Dict[str, Any]]:
             table_map.setdefault(p_num, []).append(t["markdown"])
 
         # ── Step 4: Per-page multimodal routing ──────────────────────────────
+        total_digital_pages = sum(1 for p in pdf_pages if not p.get("is_scanned", False))
+        is_predominantly_digital = total_digital_pages >= max(2, len(pdf_pages) // 4)
+
         doc_fitz = None
         try:
             doc_fitz = pymupdf.open(file_path)
         except Exception:
             pass
+
+        clip_pages_processed = 0
+        max_clip_pages = 5  # Only compute CLIP on top visual/first pages to maintain low latency
 
         for page in pdf_pages:
             p_num = page["page_number"]
@@ -89,8 +95,9 @@ def process_document(file_path: str, file_name: str) -> List[Dict[str, Any]]:
                 "faces_detected": 0
             }
 
-            # If page is scanned or contains visual elements, render pixmap for CLIP + Face Redactor
-            if page.get("is_scanned", False) or p_num == 1:
+            # Only run visual CLIP / face redactor if page is truly scanned (non-digital PDF) or page 1
+            should_render_visual = (p_num == 1) or (page.get("is_scanned", False) and not is_predominantly_digital)
+            if should_render_visual and clip_pages_processed < max_clip_pages:
                 if doc_fitz and p_num - 1 < len(doc_fitz):
                     try:
                         fitz_page = doc_fitz[p_num - 1]
@@ -103,10 +110,10 @@ def process_document(file_path: str, file_name: str) -> List[Dict[str, Any]]:
 
                         # CLIP 512-d visual embedding
                         clip_emb = clip_service.embed_image(img_np)
+                        clip_pages_processed += 1
 
-                        # Check for faces and redact on scanned pages
-                        if page.get("is_scanned", False):
-                            # Save temporary page image to test face redactor
+                        # Check for faces and redact on genuine scanned pages
+                        if page.get("is_scanned", False) and not is_predominantly_digital:
                             tmp_page_path = f"{file_path}_p{p_num}.jpg"
                             cv2.imwrite(tmp_page_path, img_np)
                             redact_res = redact_faces_in_image(tmp_page_path)
@@ -119,14 +126,19 @@ def process_document(file_path: str, file_name: str) -> List[Dict[str, Any]]:
                     except Exception as pix_err:
                         logger.warning(f"[PIPELINE ROUTER] Could not generate page {p_num} visual features: {pix_err}")
 
+            # Only activate RapidOCR if the PDF is actually scanned (not a digital PDF with empty/blank pages)
             if page.get("is_scanned", False):
-                logger.info(f"[Stage 3/3]   Page {p_num}: ⚠ Scanned/empty — activating RapidOCR")
-                ocr_text = run_ocr(file_path, page_number=p_num)
-                if ocr_text:
-                    page_text = ocr_text
-                    logger.info(f"[Stage 3/3]   Page {p_num}: ✓ OCR recovered {len(ocr_text)} chars")
+                if not is_predominantly_digital or len(pdf_pages) <= 5:
+                    logger.info(f"[Stage 3/3]   Page {p_num}: ⚠ Scanned/empty — activating RapidOCR")
+                    ocr_text = run_ocr(file_path, page_number=p_num)
+                    if ocr_text:
+                        page_text = ocr_text
+                        logger.info(f"[Stage 3/3]   Page {p_num}: ✓ OCR recovered {len(ocr_text)} chars")
+                    else:
+                        page_text = f"[Scanned page {p_num} — Visual category: {pdf_classification['predicted_category']}]"
                 else:
-                    page_text = f"[Scanned page {p_num} — Visual category: {pdf_classification['predicted_category']}]"
+                    # In digital PDFs, blank/spacer pages don't need slow OCR
+                    logger.debug(f"[Stage 3/3]   Page {p_num}: Spacer/blank digital page (OCR skipped)")
 
             # Append structured markdown tables if detected on this page
             if p_num in table_map:

@@ -237,6 +237,27 @@ async def set_cached_query(query_hash: str, query_text: str, response: str, cita
         )
         await db.commit()
 
+async def clear_query_cache(pattern: Optional[str] = None):
+    """Clears query cache entirely or for entries matching pattern."""
+    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
+        if pattern:
+            pat = f"%{pattern}%"
+            await db.execute(
+                "DELETE FROM query_cache WHERE query_text LIKE ? OR query_hash LIKE ?",
+                (pat, pat)
+            )
+        else:
+            await db.execute("DELETE FROM query_cache")
+        await db.commit()
+
+async def delete_chunks_by_doc_id(doc_id: str) -> int:
+    """Deletes chunks for a specific document without deleting the document record."""
+    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
+        cur = await db.execute("DELETE FROM document_chunks WHERE doc_id = ?", (doc_id,))
+        deleted = cur.rowcount
+        await db.commit()
+        return deleted
+
 # --- Sessions & History ---
 async def create_chat_session(session_id: str, title: str = "New Chat Session") -> Dict[str, Any]:
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:

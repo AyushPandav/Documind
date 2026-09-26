@@ -2,6 +2,7 @@ import os
 import uuid
 import time
 import base64
+import urllib.parse
 import asyncio
 import aiofiles
 import logging
@@ -16,8 +17,10 @@ from app.db.sqlite_cache import (
     get_all_documents,
     get_document,
     delete_document_and_chunks,
+    delete_chunks_by_doc_id,
     save_chunks,
-    get_all_chunks
+    get_all_chunks,
+    clear_query_cache
 )
 from app.pipelines.router import process_document
 from app.rag.chunker import chunk_document_pages
@@ -536,8 +539,37 @@ async def delete_document(doc_id: str):
             logger.warning(f"[Delete] Could not remove physical file: {e}")
 
     await delete_document_and_chunks(doc_id)
+    await clear_query_cache(doc.get("name"))
     logger.info(f"[Delete] Document '{doc['name']}' (ID: {doc_id}) removed from SQLite")
     return {"status": "deleted", "id": doc_id, "message": f"Document '{doc['name']}' removed."}
+
+@router.post("/{doc_id}/reindex")
+async def reindex_document(doc_id: str, background_tasks: BackgroundTasks):
+    """
+    Forces full re-parsing and re-indexing of an uploaded document using improved pipelines,
+    clearing previous chunks and cached queries.
+    """
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_path = doc.get("path")
+    if not file_path or not os.path.exists(file_path):
+        raise HTTPException(status_code=400, detail="Original physical file does not exist on disk.")
+
+    file_name = doc.get("name", "document")
+    await delete_chunks_by_doc_id(doc_id)
+    await clear_query_cache(file_name)
+    await update_document_status(doc_id, "QUEUED", progress=5)
+
+    background_tasks.add_task(process_and_index_document, doc_id, file_path, file_name)
+    logger.info(f"[Reindex] Re-indexing queued for '{file_name}' ({doc_id})")
+    return {
+        "status": "QUEUED",
+        "id": doc_id,
+        "name": file_name,
+        "message": f"Document '{file_name}' queued for re-indexing."
+    }
 
 @router.post("/sync")
 async def sync_documents_to_cloud(background_tasks: BackgroundTasks):

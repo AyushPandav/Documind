@@ -400,3 +400,19 @@ export async function checkDocumentsRelatedness(
     return null;
   }
 }
+
+/**
+ * Re-indexes a document using the enhanced document parsing and OCR pipeline.
+ */
+export async function reindexDocument(docId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/documents/${docId}/reindex`, {
+      method: 'POST',
+    });
+    return res.ok;
+  } catch (err) {
+    console.log('[DocuMind API] Reindex document error:', err);
+    return false;
+  }
+}
+

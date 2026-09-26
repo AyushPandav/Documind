@@ -46,17 +46,37 @@ class HybridRetriever:
 
         # Apply document filter if specified (supports single doc or comma-separated multiple docs)
         if doc_filter:
-            filter_terms = [t.strip().lower() for t in doc_filter.split(",") if t.strip()]
-            filtered_chunks = [
-                c for c in chunks
-                if any(
-                    term == c.get("doc_name", "").lower()
-                    or term == c.get("doc_id", "").lower()
-                    or term in c.get("doc_name", "").lower()
-                    or c.get("doc_name", "").lower() in term
-                    for term in filter_terms
-                )
+            import urllib.parse
+            unquoted_filter = urllib.parse.unquote(doc_filter)
+            filter_terms = [
+                t.strip().lower()
+                for raw in [doc_filter, unquoted_filter]
+                for t in raw.split(",")
+                if t.strip()
             ]
+            filter_terms = list(dict.fromkeys(filter_terms))
+
+            def _doc_matches(c: Dict[str, Any]) -> bool:
+                c_name = c.get("doc_name", "").lower()
+                c_id = c.get("doc_id", "").lower()
+                c_name_unquoted = urllib.parse.unquote(c_name)
+                for term in filter_terms:
+                    term_clean = term.strip()
+                    if not term_clean:
+                        continue
+                    if (
+                        term_clean == c_name
+                        or term_clean == c_id
+                        or term_clean == c_name_unquoted
+                        or term_clean in c_name
+                        or term_clean in c_name_unquoted
+                        or c_name in term_clean
+                        or c_name_unquoted in term_clean
+                    ):
+                        return True
+                return False
+
+            filtered_chunks = [c for c in chunks if _doc_matches(c)]
             if filtered_chunks:
                 logger.info(f"[Retriever] Doc filter '{doc_filter}': {len(filtered_chunks)}/{len(chunks)} chunks selected")
                 chunks = filtered_chunks
