@@ -8,6 +8,7 @@ import {
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Speech from 'expo-speech';
 import { Colors } from '../constants/theme';
 import { generateVoiceover } from '../services/api';
 
@@ -19,68 +20,96 @@ export const VoiceoverButton: React.FC<VoiceoverButtonProps> = ({ text }) => {
   const [status, setStatus] = useState<'idle' | 'loading' | 'playing' | 'paused'>('idle');
   const webAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioDataRef = useRef<string | null>(null);
+  const summaryRef   = useRef<string | null>(null);
+
+  const stopAll = useCallback(() => {
+    if (Platform.OS === 'web' && webAudioRef.current) {
+      webAudioRef.current.pause();
+      webAudioRef.current = null;
+    }
+    if (Platform.OS !== 'web') {
+      Speech.stop();
+    }
+    setStatus('idle');
+  }, []);
 
   const handlePress = useCallback(async () => {
-    // ── Web: full audio playback via window.Audio ──────────────────────────
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      if (status === 'playing' && webAudioRef.current) {
+    // ── Stop / pause ─────────────────────────────────────────────────────────
+    if (status === 'playing') {
+      if (Platform.OS === 'web' && webAudioRef.current) {
         webAudioRef.current.pause();
         setStatus('paused');
         return;
       }
-      if (status === 'paused' && webAudioRef.current) {
+      Speech.pause?.();          // expo-speech pause (Android ≥ API 26)
+      setStatus('paused');
+      return;
+    }
+
+    if (status === 'paused') {
+      if (Platform.OS === 'web' && webAudioRef.current) {
         webAudioRef.current.play();
         setStatus('playing');
         return;
       }
-
-      try {
-        setStatus('loading');
-        if (!audioDataRef.current) {
-          const res = await generateVoiceover(text, 'af_heart', 1.05);
-          if (!res?.audio_base64) { setStatus('idle'); return; }
-          audioDataRef.current = res.audio_base64;
-        }
-
-        const audio = new window.Audio(audioDataRef.current);
-        audio.onended = () => { setStatus('idle'); webAudioRef.current = null; };
-        audio.onerror = () => { setStatus('idle'); webAudioRef.current = null; };
-        webAudioRef.current = audio;
-        await audio.play();
-        setStatus('playing');
-      } catch {
-        setStatus('idle');
-      }
+      Speech.resume?.();
+      setStatus('playing');
       return;
     }
 
-    // ── Native (Expo Go): fetch transcript only — no expo-av needed ────────
-    if (status === 'loading' || status === 'playing') return;
-
+    // ── Fetch short summary from Kokoro backend ───────────────────────────────
     try {
       setStatus('loading');
-      // Just call backend to get the short summary; no audio playback on native
-      if (!audioDataRef.current) {
+
+      let shortSummary = summaryRef.current;
+      let audioUri     = audioDataRef.current;
+
+      if (!shortSummary || !audioUri) {
         const res = await generateVoiceover(text, 'af_heart', 1.05);
-        // Store summary text in audioDataRef for the label display
-        audioDataRef.current = res?.short_summary || text.slice(0, 120);
+        if (!res) { setStatus('idle'); return; }
+        shortSummary = res.short_summary || text.slice(0, 180);
+        audioUri     = res.audio_base64  || null;
+        summaryRef.current   = shortSummary;
+        audioDataRef.current = audioUri;
       }
-      // Flash "playing" briefly so user knows it processed
+
+      // ── Web: play Kokoro WAV via window.Audio ──────────────────────────────
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && audioUri) {
+        const audio = new window.Audio(audioUri);
+        audio.onended = () => { webAudioRef.current = null; setStatus('idle'); };
+        audio.onerror = () => { webAudioRef.current = null; setStatus('idle'); };
+        webAudioRef.current = audio;
+        await audio.play();
+        setStatus('playing');
+        return;
+      }
+
+      // ── Native (Expo Go): speak the short summary with device TTS ──────────
+      // expo-speech uses Android/iOS built-in TTS — no native module issues.
+      Speech.speak(shortSummary || text.slice(0, 180), {
+        language: 'en-US',
+        pitch: 1.0,
+        rate: 0.95,
+        onStart:  () => setStatus('playing'),
+        onDone:   () => setStatus('idle'),
+        onError:  () => setStatus('idle'),
+        onStopped:() => setStatus('idle'),
+      });
       setStatus('playing');
-      setTimeout(() => setStatus('idle'), 2000);
-    } catch {
+    } catch (err) {
+      console.log('[Voiceover] error:', err);
       setStatus('idle');
     }
-  }, [status, text]);
+  }, [status, text, stopAll]);
 
   const label =
-    status === 'loading' ? 'Kokoro Voice...' :
-    status === 'playing' ? (Platform.OS === 'web' ? 'Pause Voice' : 'Summarized ✓') :
+    status === 'loading' ? 'Generating...' :
+    status === 'playing' ? 'Tap to Stop' :
     status === 'paused'  ? 'Resume' :
     'Voice Summary';
 
-  const iconName =
-    status === 'playing' ? (Platform.OS === 'web' ? 'pause-circle' : 'checkmark-circle') :
+  const iconName: any =
+    status === 'playing' ? 'stop-circle' :
     status === 'paused'  ? 'play-circle' :
     'volume-medium-outline';
 
@@ -102,7 +131,7 @@ export const VoiceoverButton: React.FC<VoiceoverButtonProps> = ({ text }) => {
       {status === 'loading' ? (
         <ActivityIndicator size="small" color={Colors.primary} style={styles.icon} />
       ) : (
-        <Ionicons name={iconName as any} size={15} color={iconColor} style={styles.icon} />
+        <Ionicons name={iconName} size={15} color={iconColor} style={styles.icon} />
       )}
 
       <Text
@@ -115,11 +144,12 @@ export const VoiceoverButton: React.FC<VoiceoverButtonProps> = ({ text }) => {
         {label}
       </Text>
 
-      {status === 'playing' && Platform.OS === 'web' && (
+      {status === 'playing' && (
         <View style={styles.liveIndicator}>
-          <View style={[styles.waveBar, { height: 7 }]} />
+          <View style={[styles.waveBar, { height: 6 }]} />
           <View style={[styles.waveBar, { height: 11 }]} />
-          <View style={[styles.waveBar, { height: 5 }]} />
+          <View style={[styles.waveBar, { height: 7 }]} />
+          <View style={[styles.waveBar, { height: 4 }]} />
         </View>
       )}
     </TouchableOpacity>
@@ -131,8 +161,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(168, 85, 247, 0.12)',
-    paddingHorizontal: 8,
-    paddingVertical: 3.5,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
     borderRadius: 14,
     borderWidth: 1,
     borderColor: 'rgba(168, 85, 247, 0.3)',
@@ -146,15 +176,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(168, 85, 247, 0.08)',
     borderColor: 'rgba(168, 85, 247, 0.2)',
   },
-  icon: { marginRight: 4 },
-  label: { fontSize: 11, fontWeight: '600', color: '#d8b4fe' },
+  icon:         { marginRight: 4 },
+  label:        { fontSize: 11, fontWeight: '600', color: '#d8b4fe' },
   labelPlaying: { color: '#86efac' },
   labelPaused:  { color: '#67e8f9' },
-  liveIndicator: {
+  liveIndicator:{
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 1.5,
+    gap: 2,
     marginLeft: 5,
   },
-  waveBar: { width: 2, backgroundColor: '#22c55e', borderRadius: 1 },
+  waveBar: { width: 2.5, backgroundColor: '#22c55e', borderRadius: 2 },
 });

@@ -12,6 +12,181 @@ interface ChatMessageProps {
   activeCitationId?: string;
 }
 
+// ─── Minimal inline markdown renderer ──────────────────────────────────────────
+// Handles: ### headers, **bold**, *italic*, `code`, bullet lists, numbered lists
+// and inline citation chips [N].
+function renderMarkdownContent(
+  rawText: string,
+  citations: CitationSource[] | undefined,
+  activeCitationId: string | undefined,
+  onCitationPress: ((c: CitationSource, all?: CitationSource[]) => void) | undefined
+): React.ReactNode[] {
+  const lines = rawText.split('\n');
+  const nodes: React.ReactNode[] = [];
+  let key = 0;
+
+  const resolveCitation = (n: number): CitationSource =>
+    citations?.find((c) => c.index === n) || {
+      id: `cite-${n}`,
+      index: n,
+      documentId: 'doc-default',
+      documentName: 'document.pdf',
+      page: n * 4,
+      snippet: 'Relevant excerpt from indexed document.',
+      relevance: 85,
+    };
+
+  // Render a span of inline text (bold/italic/code/citations)
+  const renderInline = (text: string, baseStyle: object): React.ReactNode[] => {
+    // Split on citation markers [N], **bold**, *italic*, `code`
+    const tokenRegex = /(\[(\d+)\]|\*\*(.+?)\*\*|\*(.+?)\*|`([^`]+)`)/g;
+    const parts: React.ReactNode[] = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+
+    while ((m = tokenRegex.exec(text)) !== null) {
+      if (m.index > last) {
+        parts.push(
+          <Text key={key++} style={baseStyle}>
+            {text.slice(last, m.index)}
+          </Text>
+        );
+      }
+
+      if (m[2]) {
+        // Citation [N]
+        const n = parseInt(m[2], 10);
+        const c = resolveCitation(n);
+        parts.push(
+          <CitationChip
+            key={key++}
+            index={n}
+            active={activeCitationId === c.id}
+            onPress={() => onCitationPress?.(c, citations)}
+          />
+        );
+      } else if (m[3]) {
+        // **bold**
+        parts.push(
+          <Text key={key++} style={[baseStyle, styles.bold]}>
+            {m[3]}
+          </Text>
+        );
+      } else if (m[4]) {
+        // *italic*
+        parts.push(
+          <Text key={key++} style={[baseStyle, styles.italic]}>
+            {m[4]}
+          </Text>
+        );
+      } else if (m[5]) {
+        // `code`
+        parts.push(
+          <Text key={key++} style={styles.inlineCode}>
+            {m[5]}
+          </Text>
+        );
+      }
+
+      last = tokenRegex.lastIndex;
+    }
+
+    if (last < text.length) {
+      parts.push(
+        <Text key={key++} style={baseStyle}>
+          {text.slice(last)}
+        </Text>
+      );
+    }
+    return parts;
+  };
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Skip blank lines (add small gap)
+    if (!trimmed) {
+      nodes.push(<View key={key++} style={styles.lineGap} />);
+      i++;
+      continue;
+    }
+
+    // ### H3 / ## H2 / # H1
+    const headingMatch = trimmed.match(/^(#{1,3})\s+(.*)/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingStyle =
+        level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3;
+      nodes.push(
+        <Text key={key++} style={headingStyle}>
+          {headingMatch[2]}
+        </Text>
+      );
+      i++;
+      continue;
+    }
+
+    // Bullet: - or * or •
+    const bulletMatch = trimmed.match(/^[-*•]\s+(.*)/);
+    if (bulletMatch) {
+      nodes.push(
+        <View key={key++} style={styles.bulletRow}>
+          <Text style={styles.bulletDot}>•</Text>
+          <Text style={styles.bulletText}>
+            {renderInline(bulletMatch[1], styles.assistantText)}
+          </Text>
+        </View>
+      );
+      i++;
+      continue;
+    }
+
+    // Numbered list: 1. 2. etc.
+    const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)/);
+    if (numberedMatch) {
+      nodes.push(
+        <View key={key++} style={styles.bulletRow}>
+          <Text style={styles.numberedDot}>{numberedMatch[1]}.</Text>
+          <Text style={styles.bulletText}>
+            {renderInline(numberedMatch[2], styles.assistantText)}
+          </Text>
+        </View>
+      );
+      i++;
+      continue;
+    }
+
+    // Code block (```)
+    if (trimmed.startsWith('```')) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      nodes.push(
+        <View key={key++} style={styles.codeBlock}>
+          <Text style={styles.codeText}>{codeLines.join('\n')}</Text>
+        </View>
+      );
+      i++;
+      continue;
+    }
+
+    // Normal paragraph line
+    nodes.push(
+      <Text key={key++} style={styles.assistantText}>
+        {renderInline(trimmed, styles.assistantText)}
+      </Text>
+    );
+    i++;
+  }
+
+  return nodes;
+}
+
 export function ChatMessageItem({
   message,
   onCitationPress,
@@ -20,70 +195,7 @@ export function ChatMessageItem({
   const isUser = message.role === 'user';
   const isInsufficient = message.isInsufficientInfo;
 
-  // Render text with interactive inline citation chips: e.g. "Text [1] more text [2]."
-  const renderAssistantContent = () => {
-    const text = message.content;
-    const regex = /\[(\d+)\]/g;
-    const parts: React.ReactNode[] = [];
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text)) !== null) {
-      const matchStart = match.index;
-      const matchEnd = regex.lastIndex;
-      const citationNumber = parseInt(match[1], 10);
-
-      // Add text leading up to citation
-      if (matchStart > lastIndex) {
-        parts.push(
-          <Text key={`text-${lastIndex}`} style={styles.assistantText}>
-            {text.substring(lastIndex, matchStart)}
-          </Text>
-        );
-      }
-
-      // Find matching citation object if available
-      const citationObj = message.citations?.find(
-        (c) => c.index === citationNumber
-      ) || {
-        id: `cite-${citationNumber}`,
-        index: citationNumber,
-        documentId: 'doc-default',
-        documentName: 'company_policy.pdf',
-        page: citationNumber * 6,
-        snippet: 'Relevant excerpt extracted from indexed document store.',
-        relevance: 88,
-      };
-
-      const isActive = activeCitationId === citationObj.id;
-
-      parts.push(
-        <CitationChip
-          key={`chip-${matchStart}`}
-          index={citationNumber}
-          active={isActive}
-          onPress={() => onCitationPress?.(citationObj, message.citations)}
-        />
-      );
-
-      lastIndex = matchEnd;
-    }
-
-    if (lastIndex < text.length) {
-      parts.push(
-        <Text key={`text-${lastIndex}`} style={styles.assistantText}>
-          {text.substring(lastIndex)}
-        </Text>
-      );
-    }
-
-    return (
-      <Text style={styles.textWrapper}>
-        {parts}
-      </Text>
-    );
-  };
-
+  // ── User bubble ──────────────────────────────────────────────────────────────
   if (isUser) {
     return (
       <View style={styles.userRow}>
@@ -95,7 +207,7 @@ export function ChatMessageItem({
     );
   }
 
-  // Insufficient Information state
+  // ── Insufficient info bubble ─────────────────────────────────────────────────
   if (isInsufficient) {
     return (
       <View style={styles.assistantRow}>
@@ -111,10 +223,11 @@ export function ChatMessageItem({
     );
   }
 
-  // Standard Assistant message with purple glass styling
+  // ── Assistant bubble ─────────────────────────────────────────────────────────
   return (
     <View style={styles.assistantRow}>
       <View style={styles.assistantBubble}>
+        {/* Header: sender label + voice button */}
         <View style={styles.assistantHeader}>
           <View style={styles.senderContainer}>
             <View style={styles.assistantAccentDot} />
@@ -123,9 +236,17 @@ export function ChatMessageItem({
           <VoiceoverButton text={message.content} />
         </View>
 
-        {renderAssistantContent()}
+        {/* Rendered markdown body */}
+        <View style={styles.contentBody}>
+          {renderMarkdownContent(
+            message.content,
+            message.citations,
+            activeCitationId,
+            onCitationPress
+          )}
+        </View>
 
-        {/* Quick citation summary pills if citations exist */}
+        {/* Citation pills footer */}
         {message.citations && message.citations.length > 0 && (
           <View style={styles.citationsFooter}>
             <Text style={styles.sourcesLabel}>Sources:</Text>
@@ -147,18 +268,27 @@ export function ChatMessageItem({
 }
 
 const styles = StyleSheet.create({
+  // ── Layout ──────────────────────────────────────────────────────────────────
   userRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    marginVertical: 6,
-    paddingLeft: 40,
+    marginVertical: 5,
+    paddingLeft: 44,
   },
+  assistantRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    marginVertical: 5,
+    paddingRight: 16,
+  },
+
+  // ── User bubble ──────────────────────────────────────────────────────────────
   userBubble: {
     backgroundColor: Colors.surface,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 8,
-    borderBottomRightRadius: 2,
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 16,
+    borderBottomRightRadius: 4,
     paddingHorizontal: 14,
     paddingVertical: 10,
     maxWidth: '85%',
@@ -176,31 +306,28 @@ const styles = StyleSheet.create({
     marginTop: 4,
     alignSelf: 'flex-end',
   },
-  assistantRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-start',
-    marginVertical: 6,
-    paddingRight: 32,
-  },
+
+  // ── Assistant bubble ─────────────────────────────────────────────────────────
   assistantBubble: {
-    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    backgroundColor: 'rgba(255,255,255,0.03)',
     borderWidth: 1,
-    borderColor: 'rgba(168, 85, 247, 0.3)',
-    borderRadius: 8,
-    borderBottomLeftRadius: 2,
+    borderColor: 'rgba(168,85,247,0.3)',
+    borderRadius: 16,
+    borderBottomLeftRadius: 4,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingTop: 10,
+    paddingBottom: 10,
     maxWidth: '92%',
     shadowColor: Colors.secondaryPurple,
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 6,
   },
   assistantHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   senderContainer: {
     flexDirection: 'row',
@@ -220,18 +347,109 @@ const styles = StyleSheet.create({
     color: Colors.secondaryPurple,
     letterSpacing: 0.4,
   },
-  textWrapper: {
-    fontFamily: Fonts.sans,
-    fontSize: 14,
-    lineHeight: 22,
-    color: Colors.textPrimary,
+  contentBody: {
+    gap: 2,
   },
+
+  // ── Markdown elements ────────────────────────────────────────────────────────
   assistantText: {
     fontFamily: Fonts.sans,
     fontSize: 14,
     lineHeight: 22,
     color: Colors.textPrimary,
+    flexWrap: 'wrap',
   },
+  bold: {
+    fontWeight: '700',
+    color: '#e2d9f3',
+  },
+  italic: {
+    fontStyle: 'italic',
+    color: '#c4b5d4',
+  },
+  inlineCode: {
+    fontFamily: Fonts.mono,
+    fontSize: 12,
+    backgroundColor: 'rgba(168,85,247,0.15)',
+    color: '#e879f9',
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 4,
+  },
+  h1: {
+    fontFamily: Fonts.sans,
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#f3e8ff',
+    marginTop: 10,
+    marginBottom: 4,
+    letterSpacing: 0.2,
+  },
+  h2: {
+    fontFamily: Fonts.sans,
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#e9d5ff',
+    marginTop: 8,
+    marginBottom: 3,
+  },
+  h3: {
+    fontFamily: Fonts.sans,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#ddd6fe',
+    marginTop: 6,
+    marginBottom: 2,
+  },
+  bulletRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginVertical: 2,
+    paddingLeft: 4,
+  },
+  bulletDot: {
+    color: Colors.secondaryPurple,
+    fontSize: 14,
+    marginRight: 7,
+    marginTop: 3,
+    lineHeight: 20,
+  },
+  numberedDot: {
+    fontFamily: Fonts.mono,
+    color: Colors.secondaryPurple,
+    fontSize: 13,
+    marginRight: 7,
+    marginTop: 3,
+    lineHeight: 20,
+    minWidth: 18,
+  },
+  bulletText: {
+    fontFamily: Fonts.sans,
+    fontSize: 14,
+    lineHeight: 22,
+    color: Colors.textPrimary,
+    flex: 1,
+    flexWrap: 'wrap',
+  },
+  codeBlock: {
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(168,85,247,0.2)',
+    padding: 10,
+    marginVertical: 6,
+  },
+  codeText: {
+    fontFamily: Fonts.mono,
+    fontSize: 12,
+    color: '#a5f3fc',
+    lineHeight: 18,
+  },
+  lineGap: {
+    height: 6,
+  },
+
+  // ── Citations ────────────────────────────────────────────────────────────────
   citationsFooter: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -240,7 +458,7 @@ const styles = StyleSheet.create({
     marginTop: 10,
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+    borderTopColor: 'rgba(255,255,255,0.06)',
   },
   sourcesLabel: {
     fontFamily: Fonts.mono,
@@ -254,12 +472,14 @@ const styles = StyleSheet.create({
     color: Colors.textMuted,
     marginTop: 6,
   },
+
+  // ── Insufficient info ────────────────────────────────────────────────────────
   insufficientBubble: {
     backgroundColor: Colors.warningBackground,
     borderWidth: 1,
     borderColor: Colors.warning,
-    borderRadius: 8,
-    borderBottomLeftRadius: 2,
+    borderRadius: 16,
+    borderBottomLeftRadius: 4,
     paddingHorizontal: 14,
     paddingVertical: 12,
     maxWidth: '92%',
