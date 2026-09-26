@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
 from app.rag.embeddings import embedding_service
 from app.rag.clip_embeddings import clip_service
+from app.rag.language_service import detect_language, translate_query_for_retrieval
 
 logger = logging.getLogger("DocuMind.Retriever")
 
@@ -84,13 +85,21 @@ class HybridRetriever:
                 logger.warning(f"[Retriever] Doc filter '{doc_filter}' matched 0 chunks — using full corpus")
 
         n = len(chunks)
-        logger.info(f"[Retriever] Query: '{query[:60]}...' | Corpus: {n} chunks | top_k: {top_k}")
 
-        # ── Lane 1: Sparse BM25 Keyword Scoring ──────────────────────────────
+        # ── Language Detection & Cross-Language BM25 Augmentation ────────────
+        query_lang = detect_language(query)
+        augmented_query = translate_query_for_retrieval(query, query_lang)
+        logger.info(
+            f"[Retriever] Query: '{query[:60]}' | Lang: {query_lang.upper()} | "
+            f"Corpus: {n} chunks | top_k: {top_k}"
+        )
+
+        # ── Lane 1: Sparse BM25 Keyword Scoring (bilingual-augmented) ─────────
         t1 = time.monotonic()
         corpus_tokenized = [c["content"].lower().split() for c in chunks]
         bm25 = BM25Okapi(corpus_tokenized)
-        query_tokens = query.lower().split()
+        # Use augmented query (with cross-language keyword expansions) for BM25
+        query_tokens = augmented_query.lower().split()
         bm25_scores = bm25.get_scores(query_tokens)
         bm25_ranked_indices = np.argsort(bm25_scores)[::-1]
         t1_elapsed = time.monotonic() - t1

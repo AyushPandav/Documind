@@ -9,6 +9,12 @@ from app.rag.retriever import hybrid_retriever
 from app.rag.query_router import query_router
 from app.rag.web_search import web_search_retriever
 from app.rag.live_apis import live_api_service
+from app.rag.language_service import (
+    detect_language,
+    get_language_label,
+    get_response_language_instruction,
+    translate_query_for_retrieval
+)
 from app.core.circuit_breaker import generate_rag_response
 
 logger = logging.getLogger("DocuMind.LoopEngine")
@@ -383,9 +389,15 @@ class SelfReflectiveRAGLoop:
 
         context_str = "\n\n---\n\n".join(context_blocks)
 
-        # ── Step 5: Strict Evidence-Grounded Prompt Construction ──────────────
+        # ── Step 5: Language Detection + Strict Evidence-Grounded Prompt ──────
+        query_lang = detect_language(clean_query)
+        language_instruction = get_response_language_instruction(query_lang)
+        logger.info(f"[LoopEngine] Step 5: Query language detected = {get_language_label(query_lang)}")
+
         prompt = (
-            f"You are an evidence-grounded document intelligence and research assistant.\n\n"
+            f"You are an evidence-grounded bilingual document intelligence and research assistant. "
+            f"You support both Hindi (हिंदी) and English queries and documents.\n\n"
+            f"{language_instruction}\n\n"
             f"EVIDENCE CONTEXT:\n{context_str}\n\n"
             f"USER QUERY: {clean_query}\n\n"
             f"GROUNDING INSTRUCTIONS:\n"
@@ -393,10 +405,11 @@ class SelfReflectiveRAGLoop:
             f"2. If the user question requires internal documents, cite the document and page using bracketed numbers like [1].\n"
             f"3. If the user question requires current, live, or web facts, use the web/live evidence and cite it using [1], [2].\n"
             f"4. If the question asks for both (e.g. document figures and current web data), clearly provide both parts and cite their respective sources.\n"
-            f"5. If the available evidence is insufficient to answer reliably, explicitly say that the available sources do not contain enough information to answer reliably without inventing facts.\n"
+            f"5. If the available evidence is insufficient to answer reliably, say so explicitly — never invent facts.\n"
             f"6. If sources conflict, explicitly identify the conflicting claims and cite both sources.\n"
-            f"7. Answer conversationally, clearly, and directly without robotic introductory boilerplate (e.g. avoid 'Based on the context provided...').\n"
-            f"8. Ensure every factual claim includes its bracketed citation tag like [1] or [2]."
+            f"7. Answer conversationally and directly without robotic introductory boilerplate.\n"
+            f"8. Ensure every factual claim includes its bracketed citation tag like [1] or [2].\n"
+            f"9. If translating content between Hindi and English, preserve key terms, numbers, and names accurately."
         )
 
         # ── Step 6: LLM Synthesis via Circuit Breaker ──────────────────────────

@@ -1,6 +1,7 @@
 import re
 import logging
 from typing import List, Dict, Any, Optional
+from app.rag.language_service import detect_language, translate_query_for_retrieval
 
 logger = logging.getLogger("DocuMind.QueryRouter")
 
@@ -70,17 +71,41 @@ class IntelligentQueryRouter:
 
         # Web search triggers
         self.web_search_triggers = [
+            # English
             "latest", "today", "current", "news", "recent", "stock price", "share price",
             "market cap", "ceo of", "who is", "who won", "current president",
             "release date", "search the web", "search online", "google", "live", "updated",
-            "now", "2025", "2026", "world news", "current price"
+            "now", "2025", "2026", "world news", "current price",
+            # Hindi equivalents
+            "ताज़ा", "अभी", "वर्तमान", "खबर", "समाचार", "हालिया",
+            "स्टॉक मूल्य", "शेयर मूल्य", "लाइव", "अपडेट"
         ]
 
-        # Internal document triggers
+        # Internal document triggers (English + Hindi)
         self.doc_triggers = [
+            # English
             "document", "doc", "pdf", "file", "uploaded", "report", "manual",
             "page", "policy", "handbook", "contract", "section", "table", "sheet",
-            "according to the", "in the file", "in this document", "our company"
+            "according to the", "in the file", "in this document", "our company",
+            # Hindi equivalents
+            "दस्तावेज़", "फ़ाइल", "रिपोर्ट", "पृष्ठ", "पेज", "नीति", "अनुबंध",
+            "अनुभाग", "तालिका", "इस दस्तावेज़ में", "हमारी कंपनी", "अपलोड"
+        ]
+
+        # Hindi time patterns
+        self.hindi_time_patterns = [
+            r"(?:अभी का|\s+)समय",
+            r"आज की तारीख",
+            r"क्या समय है",
+            r"आज क्या दिन है",
+        ]
+
+        # Hindi weather patterns
+        self.hindi_weather_patterns = [
+            r"मौसम",
+            r"तापमान",
+            r"बारिश",
+            r"हवा",
         ]
 
     def route(
@@ -93,17 +118,33 @@ class IntelligentQueryRouter:
         Analyzes query intent, routing to one or more retrieval sources.
         """
         q_lower = query.lower().strip()
+        query_lang = detect_language(query)
+        logger.info(f"[QueryRouter] Detected query language: {query_lang.upper()}")
 
-        # 1. Check for Live APIs
+        # 1. Check for Live APIs (English patterns)
         live_api = None
         for pat in self.time_patterns:
             if re.search(pat, q_lower):
                 live_api = "time"
                 break
 
+        # Check Hindi time patterns
+        if not live_api:
+            for pat in self.hindi_time_patterns:
+                if re.search(pat, query):
+                    live_api = "time"
+                    break
+
         if not live_api:
             for pat in self.weather_patterns:
                 if re.search(pat, q_lower):
+                    live_api = "weather"
+                    break
+
+        # Check Hindi weather patterns
+        if not live_api:
+            for pat in self.hindi_weather_patterns:
+                if re.search(pat, query):
                     live_api = "weather"
                     break
 

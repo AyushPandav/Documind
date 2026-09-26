@@ -168,5 +168,31 @@ def run_ocr(file_path: str, page_number: int = 1) -> str:
         except Exception as fitz_err:
             logger.error(f"  │  [OCR] PyMuPDF fallback also failed: {fitz_err}")
 
+    # Step 5: Tesseract bilingual OCR (Hindi + English) as last resort
+    try:
+        import pytesseract
+        from PIL import Image
+
+        logger.info(f"  │  [OCR] Attempting Tesseract bilingual OCR (hin+eng)...")
+        if isinstance(target_for_ocr, np.ndarray):
+            pil_img = Image.fromarray(target_for_ocr)
+        elif isinstance(target_for_ocr, str) and os.path.exists(target_for_ocr):
+            pil_img = Image.open(target_for_ocr)
+        else:
+            pil_img = None
+
+        if pil_img is not None:
+            # Try Hindi+English first, fall back to English only
+            try:
+                tess_text = pytesseract.image_to_string(pil_img, lang="hin+eng", config="--psm 3")
+            except Exception:
+                tess_text = pytesseract.image_to_string(pil_img, lang="eng", config="--psm 3")
+
+            if tess_text.strip():
+                logger.info(f"  └─ [OCR] Tesseract bilingual SUCCESS: {len(tess_text)} chars extracted")
+                return tess_text.strip()
+    except Exception as tess_err:
+        logger.warning(f"  │  [OCR] Tesseract bilingual OCR failed: {tess_err}")
+
     logger.warning(f"  └─ [OCR] All OCR engines exhausted — returning empty string for page {page_number}")
     return ""
