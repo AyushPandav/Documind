@@ -365,20 +365,21 @@ class SelfReflectiveRAGLoop:
                     f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
                     f"User Question: {query}\n\n"
                     f"Instructions:\n"
-                    f"- The user is querying across multiple selected documents.\n"
-                    f"- Provide a clear, structured response synthesizing and comparing the information across ALL provided documents.\n"
-                    f"- Highlight key provisions, similarities, differences, and important takeaways from each document.\n"
-                    f"- Cite your sources using bracketed notation like [1], [2] referencing the context items."
+                    f"- You are a helpful, conversational AI chatbot. Answer naturally and directly.\n"
+                    f"- DO NOT use robotic template openings like 'Based on the context evidence provided...' or 'Based on the provided documents...'. Start directly with the information.\n"
+                    f"- Synthesize and compare the documents clearly: their type, what data/topics they contain, row counts/schemas if spreadsheets, and key takeaways.\n"
+                    f"- Cite sources using bracketed numbers like [1], [2] referencing the context items."
                 )
             else:
                 prompt = (
                     f"Context Evidence from Document:\n{context_str}\n\n"
                     f"User Question: {query}\n\n"
                     f"Instructions:\n"
-                    f"- The user is asking for an overview, summary, or description of the document.\n"
-                    f"- Provide a clear, structured, and informative description explaining what this document is about.\n"
-                    f"- Summarize the primary topics covered, core purpose, key rules/guidelines, and important takeaways based on the context evidence.\n"
-                    f"- Cite your sources using bracketed notation like [1], [2] referencing the context items."
+                    f"- You are a helpful, conversational AI chatbot. Answer naturally and directly.\n"
+                    f"- DO NOT use robotic template openings like 'Based on the context evidence provided...' or 'According to the document...'. Start directly with the information.\n"
+                    f"- Provide a clear, natural breakdown of what this document is, its structure, key contents, and core purpose.\n"
+                    f"- If it is a spreadsheet or tabular data, mention total rows, columns, and sample entries.\n"
+                    f"- Cite sources using bracketed numbers like [1], [2] referencing the context items."
                 )
         else:
             if len(filter_terms) > 1:
@@ -386,19 +387,20 @@ class SelfReflectiveRAGLoop:
                     f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
                     f"User Question: {query}\n\n"
                     f"Instructions:\n"
-                    f"- Answer the question using the provided context chunks across all selected documents.\n"
+                    f"- Answer conversationally and directly like a normal chatbot without repetitive introductory filler.\n"
+                    f"- Answer the user's question using the provided context chunks across the selected documents.\n"
                     f"- Compare how each relevant document addresses the question and cite differences.\n"
-                    f"- Cite your sources using bracketed notation [1], [2] referencing the numbered context.\n"
-                    f"- If the evidence does not provide enough facts, state clearly what the documents cover instead."
+                    f"- Cite sources using bracketed numbers [1], [2] at the relevant facts."
                 )
             else:
                 prompt = (
                     f"Context Evidence:\n{context_str}\n\n"
                     f"User Question: {query}\n\n"
                     f"Instructions:\n"
-                    f"- Answer the question strictly using the provided context chunks.\n"
-                    f"- Cite your sources using bracketed notation [1], [2] referencing the numbered context.\n"
-                    f"- If the evidence does not provide enough facts, state clearly what the document covers instead."
+                    f"- Answer conversationally and directly like a normal chatbot without repetitive introductory filler.\n"
+                    f"- Answer the user's question directly using the provided context chunks.\n"
+                    f"- For spreadsheet queries, cite rows, columns, counts, or values directly from the tables.\n"
+                    f"- Cite sources using bracketed numbers [1], [2] at the relevant facts."
                 )
 
         # ── Step 6: LLM Synthesis via Circuit Breaker ──────────────────────────

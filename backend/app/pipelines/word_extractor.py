@@ -161,26 +161,119 @@ def extract_pptx(file_path: str) -> List[Dict[str, Any]]:
 
 def extract_excel(file_path: str) -> List[Dict[str, Any]]:
     """
-    Extracts tables from Excel (.xlsx) files and converts sheets to Markdown tables.
+    Extracts structured data from Excel (.xlsx and .xls) files.
+    Generates:
+    1. A comprehensive Sheet Overview page per sheet (total rows, columns, data types,
+       numeric summaries, categorical unique values, sample preview).
+    2. Paginated Markdown table pages preserving column headers for granular row retrieval.
     """
     logger.info(f"[WordExtractor] ▶ Extracting Excel spreadsheet: {os.path.basename(file_path)}")
     try:
         import pandas as pd
-        excel_file = pd.ExcelFile(file_path)
+        ext = os.path.splitext(file_path)[1].lower()
+        engine = "xlrd" if ext == ".xls" else "openpyxl"
+        try:
+            excel_file = pd.ExcelFile(file_path, engine=engine)
+        except Exception:
+            excel_file = pd.ExcelFile(file_path)
+
         pages = []
-        for idx, sheet_name in enumerate(excel_file.sheet_names):
+        page_num = 1
+
+        for sheet_name in excel_file.sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet_name)
-            md_table = df.to_markdown(index=False) if hasattr(df, "to_markdown") else str(df)
+            total_rows, total_cols = df.shape
+
+            clean_cols = [
+                str(c) if not str(c).startswith("Unnamed:") else f"Col_{i+1}"
+                for i, c in enumerate(df.columns)
+            ]
+            df.columns = clean_cols
+
+            # 1. Sheet Overview & Schema Summary
+            summary_lines = [
+                f"### Sheet Overview: {sheet_name}",
+                f"- **Total Rows**: {total_rows}",
+                f"- **Total Columns**: {total_cols}",
+                f"- **Columns**: {', '.join(clean_cols)}",
+                ""
+            ]
+
+            num_cols = df.select_dtypes(include="number").columns
+            if len(num_cols) > 0:
+                summary_lines.append("**Numeric Column Statistics:**")
+                for nc in num_cols[:6]:
+                    summary_lines.append(
+                        f"- {nc}: min={df[nc].min()}, max={df[nc].max()}, avg={df[nc].mean():.2f}"
+                    )
+                summary_lines.append("")
+
+            cat_cols = df.select_dtypes(include=["object", "string", "category"]).columns
+            if len(cat_cols) > 0:
+                summary_lines.append("**Categorical Column Summaries:**")
+                for cc in cat_cols[:6]:
+                    uniques = df[cc].dropna().unique()
+                    sample_vals = [str(v) for v in uniques[:5]]
+                    summary_lines.append(
+                        f"- {cc}: {len(uniques)} unique values (sample: {', '.join(sample_vals)})"
+                    )
+                summary_lines.append("")
+
+            summary_lines.append("**Sample Records Preview (First 5 Rows):**\n")
+            preview_md = df.head(5).to_markdown(index=False) if hasattr(df, "to_markdown") else str(df.head(5))
+            summary_lines.append(preview_md)
+
             pages.append({
-                "page_number": idx + 1,
-                "content": f"### Sheet: {sheet_name}\n\n{md_table}",
-                "source_type": "xlsx"
+                "page_number": page_num,
+                "content": "\n".join(summary_lines),
+                "source_type": "xlsx_summary"
             })
-        logger.info(f"[WordExtractor] ✓ Extracted {len(pages)} sheet(s) from Excel")
+            page_num += 1
+
+            # 2. Paginated Data Rows
+            # For massive datasets, index the first 150 rows + last 30 rows to balance speed and accuracy
+            step = 30
+            if total_rows <= 200:
+                for start_idx in range(0, total_rows, step):
+                    end_idx = min(start_idx + step, total_rows)
+                    chunk_df = df.iloc[start_idx:end_idx]
+                    table_md = chunk_df.to_markdown(index=False) if hasattr(df, "to_markdown") else str(chunk_df)
+                    pages.append({
+                        "page_number": page_num,
+                        "content": f"### Sheet: {sheet_name} (Rows {start_idx + 1} to {end_idx} of {total_rows})\n\n{table_md}",
+                        "source_type": "xlsx_data"
+                    })
+                    page_num += 1
+            else:
+                # First 120 rows
+                for start_idx in range(0, min(120, total_rows), step):
+                    end_idx = min(start_idx + step, total_rows)
+                    chunk_df = df.iloc[start_idx:end_idx]
+                    table_md = chunk_df.to_markdown(index=False) if hasattr(df, "to_markdown") else str(chunk_df)
+                    pages.append({
+                        "page_number": page_num,
+                        "content": f"### Sheet: {sheet_name} (Rows {start_idx + 1} to {end_idx} of {total_rows})\n\n{table_md}",
+                        "source_type": "xlsx_data"
+                    })
+                    page_num += 1
+
+                # Tail 30 rows
+                tail_start = max(120, total_rows - 30)
+                tail_df = df.iloc[tail_start:total_rows]
+                table_md = tail_df.to_markdown(index=False) if hasattr(df, "to_markdown") else str(tail_df)
+                pages.append({
+                    "page_number": page_num,
+                    "content": f"### Sheet: {sheet_name} (Rows {tail_start + 1} to {total_rows} of {total_rows} - Final Rows)\n\n{table_md}",
+                    "source_type": "xlsx_data"
+                })
+                page_num += 1
+
+        logger.info(f"[WordExtractor] ✓ Extracted {len(pages)} structured page(s) from Excel")
         return pages if pages else [{"page_number": 1, "content": "[Empty spreadsheet]", "source_type": "xlsx"}]
+
     except Exception as e:
-        logger.warning(f"[WordExtractor] pandas read_excel failed ({e}), attempting fallback...")
-        return [{"page_number": 1, "content": f"[Excel spreadsheet: {os.path.basename(file_path)}]", "source_type": "xlsx"}]
+        logger.error(f"[WordExtractor] Error extracting Excel spreadsheet ({e}): {traceback.format_exc() if 'traceback' in globals() else e}")
+        return [{"page_number": 1, "content": f"[Excel spreadsheet: {os.path.basename(file_path)} — Error parsing: {e}]", "source_type": "xlsx"}]
 
 
 def extract_json_file(file_path: str) -> List[Dict[str, Any]]:

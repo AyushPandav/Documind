@@ -52,16 +52,24 @@ export async function fetchBackendDocuments(): Promise<DocumentItem[] | null> {
     const res = await fetch(`${API_BASE_URL}/api/documents`);
     if (!res.ok) return null;
     const data = await res.json();
-    return data.map((d: any) => ({
-      id: d.id,
-      name: d.name,
-      uri: d.path,
-      size: d.size,
-      pages: d.pages || 1,
-      status: d.status,
-      progress: d.progress || 100,
-      uploadedAt: d.created_at || 'Recently',
-    }));
+    return data.map((d: any) => {
+      let cleanName = d.name || '';
+      try {
+        cleanName = decodeURIComponent(cleanName);
+      } catch {
+        // fallback
+      }
+      return {
+        id: d.id,
+        name: cleanName,
+        uri: d.path,
+        size: d.size,
+        pages: d.pages || 1,
+        status: d.status,
+        progress: d.progress || 100,
+        uploadedAt: d.created_at || 'Recently',
+      };
+    });
   } catch (err) {
     console.log('[DocuMind API] Documents fetch skipped/offline:', err);
     return null;
@@ -102,7 +110,7 @@ export async function uploadDocumentToBackend(
           console.log(`[DocuMind API] uploadAsync SUCCESS for ${fileName}:`, data.id);
           return {
             id: data.id,
-            name: data.name,
+            name: decodeURIComponent(data.name || fileName),
             size: data.size,
             pages: data.pages || 1,
             status: data.status,
@@ -140,7 +148,7 @@ export async function uploadDocumentToBackend(
           console.log(`[DocuMind API] Base64 upload SUCCESS for ${fileName}:`, data.id);
           return {
             id: data.id,
-            name: data.name,
+            name: decodeURIComponent(data.name || fileName),
             size: data.size,
             pages: data.pages || 1,
             status: data.status,

@@ -11,6 +11,15 @@ interface DocumentRowProps {
   onSelect: (doc: DocumentItem) => void;
 }
 
+const formatDocName = (name?: string) => {
+  if (!name) return '';
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+};
+
 export function DocumentRow({
   document,
   isSelected = false,
@@ -41,7 +50,7 @@ export function DocumentRow({
             numberOfLines={1}
             ellipsizeMode="middle"
           >
-            {document.name}
+            {formatDocName(document.name)}
           </Text>
 
           <View style={styles.metaRow}>

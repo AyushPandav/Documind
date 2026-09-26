@@ -200,7 +200,8 @@ async def upload_document(
         raise HTTPException(status_code=413, detail=f"File exceeds {MAX_FILE_SIZE_MB} MB limit.")
 
     doc_id = f"doc-{uuid.uuid4().hex[:8]}"
-    file_name = file.filename or f"doc_{doc_id}{ext}"
+    raw_name = file.filename or f"doc_{doc_id}{ext}"
+    file_name = urllib.parse.unquote(raw_name)
     file_path = os.path.join(settings.UPLOAD_DIR, f"{doc_id}_{file_name}")
     file_size_str = f"{max(0.1, round(file_size_mb_val, 1))} MB"
 
@@ -249,7 +250,7 @@ async def upload_base64_document(
     Eliminates all native mobile multipart boundary and WinterCG fetch errors.
     Decodes the raw bytes, stores to upload directory, and triggers the 5-stage ingestion pipeline.
     """
-    file_name = request.filename or "uploaded_document.pdf"
+    file_name = urllib.parse.unquote(request.filename or "uploaded_document.pdf")
     ext = os.path.splitext(file_name)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -326,7 +327,7 @@ async def upload_batch_documents(
     rejected_files = []
 
     for idx, file in enumerate(files):
-        file_name = file.filename or f"batch_doc_{idx + 1}"
+        file_name = urllib.parse.unquote(file.filename or f"batch_doc_{idx + 1}")
         ext = os.path.splitext(file_name)[1].lower()
 
         logger.info(f"[BatchUpload] Processing file {idx + 1}/{len(files)}: '{file_name}'")

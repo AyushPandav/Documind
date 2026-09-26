@@ -4,10 +4,20 @@ import {
   Text,
   StyleSheet,
   FlatList,
+  ScrollView,
   KeyboardAvoidingView,
   Platform,
   Pressable,
 } from 'react-native';
+
+const formatDocName = (name?: string) => {
+  if (!name) return '';
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+};
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -270,7 +280,7 @@ export default function MainAppScreen() {
             <Text style={styles.contextIndicatorText} numberOfLines={1}>
               {selectedDocuments.length > 1
                 ? `${selectedDocuments.length} Docs`
-                : selectedDocuments[0].name}
+                : formatDocName(selectedDocuments[0].name)}
             </Text>
             <Pressable
               onPress={(e: any) => {
@@ -304,8 +314,13 @@ export default function MainAppScreen() {
       >
         <View style={styles.chatContainer}>
           {messages.length === 0 ? (
-            /* Empty Chat State */
-            <View style={styles.emptyContainer}>
+            /* Empty Chat State with Scrollable Viewport */
+            <ScrollView
+              style={styles.emptyScrollView}
+              contentContainerStyle={styles.emptyContainer}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
               <View
                 style={[
                   styles.emptyIconOutline,
@@ -330,12 +345,12 @@ export default function MainAppScreen() {
                 {selectedDocuments.length > 1
                   ? `Ready to query\n${selectedDocuments.length} Selected Documents`
                   : selectedDocument
-                  ? `Ready to query\n${selectedDocument.name}`
+                  ? `Ready to query\n${formatDocName(selectedDocument.name)}`
                   : 'Upload a document\nto get started'}
               </Text>
               <Text style={styles.emptySubtitle}>
                 {selectedDocuments.length > 1
-                  ? `Cross-referencing: ${selectedDocuments.map((d) => d.name).join(', ')}\nAsk comparative questions, find discrepancies, or synthesize findings across all files.`
+                  ? `Cross-referencing: ${selectedDocuments.map((d) => formatDocName(d.name)).join(', ')}\nAsk comparative questions, find discrepancies, or synthesize findings across all files.`
                   : selectedDocument
                   ? 'Ask anything about this document.\nResponses and history are stored locally only.'
                   : 'Upload a PDF, image, or document.\nYour chat is saved locally on device.'}
@@ -352,7 +367,7 @@ export default function MainAppScreen() {
                         color={Colors.primaryCyan}
                       />
                       <Text style={styles.emptyDocChipText} numberOfLines={1}>
-                        {doc.name}
+                        {formatDocName(doc.name)}
                       </Text>
                     </View>
                   ))}
@@ -392,7 +407,7 @@ export default function MainAppScreen() {
                   </Pressable>
                 ))}
               </View>
-            </View>
+            </ScrollView>
           ) : (
             /* Message Feed */
             <FlatList
@@ -584,12 +599,16 @@ const styles = StyleSheet.create({
   loadingContainer: {
     marginVertical: 4,
   },
-  emptyContainer: {
+  emptyScrollView: {
     flex: 1,
+  },
+  emptyContainer: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
-    paddingVertical: 32,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 28,
   },
   emptyIconOutline: {
     width: 60,

@@ -39,6 +39,15 @@ export function ChatInput({
     setText('');
   };
 
+  const formatDocName = (name?: string) => {
+    if (!name) return '';
+    try {
+      return decodeURIComponent(name);
+    } catch {
+      return name;
+    }
+  };
+
   const isSendDisabled = !text.trim() || disabled;
   const multiCount = selectedDocuments.length;
   const singleDoc = multiCount === 1 ? selectedDocuments[0] : selectedDocument;
@@ -47,14 +56,14 @@ export function ChatInput({
     multiCount > 1
       ? `Ask across ${multiCount} selected documents...`
       : singleDoc
-      ? `Ask about ${singleDoc.name}...`
+      ? `Ask about ${formatDocName(singleDoc.name)}...`
       : 'Ask about your documents...';
 
   const helperText =
     multiCount > 1
       ? `Cross-referencing ${multiCount} documents • Grounded with citations`
       : singleDoc
-      ? `Grounded in ${singleDoc.name} • Cites page & sections`
+      ? `Grounded in ${formatDocName(singleDoc.name)} • Cites page & sections`
       : 'Ask a question about your uploaded documents';
 
   return (
@@ -100,7 +109,7 @@ export function ChatInput({
               <View key={doc.id} style={styles.docChip}>
                 <Ionicons name="document-text-outline" size={11} color={Colors.primaryCyan} />
                 <Text style={styles.docChipName} numberOfLines={1}>
-                  {doc.name}
+                  {formatDocName(doc.name)}
                 </Text>
                 {onRemoveDocument && (
                   <Pressable
@@ -123,7 +132,7 @@ export function ChatInput({
           <View style={styles.contextPill}>
             <Ionicons name="document-text-outline" size={13} color={Colors.primaryCyan} />
             <Text style={styles.contextText} numberOfLines={1}>
-              Context: {singleDoc.name}
+              Context: {formatDocName(singleDoc.name)}
             </Text>
             {onClearContext && (
               <Pressable

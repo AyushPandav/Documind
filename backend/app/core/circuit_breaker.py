@@ -4,16 +4,39 @@ import logging
 from typing import List, Dict, Any, Optional
 from app.config import settings
 
+import re
+
 logger = logging.getLogger("DocuMind.CircuitBreaker")
 
 DOCUMIND_SYSTEM_PROMPT = (
-    "You are DocuMind, an elite AI Document Intelligence Engine. "
-    "Answer using the provided context chunks. "
-    "Cite your sources using bracketed notation like [1], [2] referencing the numbered context items. "
-    "If the user asks what the document is about, summarize it, or asks for an overview or description, "
-    "provide a comprehensive, well-structured description of the document's topics, key takeaways, and core purpose. "
-    "If the context does not explicitly mention the exact specific detail asked, explain what the document covers instead based on the available evidence, with citations."
+    "You are DocuMind, an intelligent, helpful document assistant. "
+    "You talk and respond like a normal, friendly chatbot while remaining grounded and accurate.\n"
+    "CRITICAL CONVERSATIONAL RULES:\n"
+    "1. Never start responses with repetitive robotic boilerplate such as 'Based on the context evidence provided...', 'Based on the provided documents...', or 'According to the context...'. Jump straight into answering the user's question directly and conversationally.\n"
+    "2. For spreadsheets and tabular datasets, directly detail what the data contains: row counts, columns, data types, distributions, and specific records.\n"
+    "3. Ground all factual assertions using bracketed citation numbers like [1], [2] referencing the context chunks.\n"
+    "4. Format responses cleanly with readable paragraphs, bullet points, or markdown tables when helpful."
 )
+
+
+def clean_robotic_intro(text: str) -> str:
+    """
+    Strips robotic formulaic opening phrases that LLMs tend to prepend,
+    e.g. 'Based on the context evidence provided, the document is...' -> 'The document is...'
+    """
+    if not text:
+        return text
+    patterns = [
+        r"^(?:Based on the (?:context evidence provided|context provided|provided documents|provided document|context),?\s*)",
+        r"^(?:According to the (?:provided documents|provided document|context|evidence),?\s*)",
+        r"^(?:From the (?:provided context|provided documents|context),?\s*)"
+    ]
+    cleaned = text.strip()
+    for pat in patterns:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
 
 
 async def call_ollama_api(prompt: str, context_chunks: List[Dict[str, Any]]) -> Optional[str]:
@@ -261,18 +284,18 @@ async def generate_rag_response(prompt: str, context_chunks: List[Dict[str, Any]
     # Tier 1: Local Ollama (Qwen 2.5 3B-Instruct)
     res = await call_ollama_api(prompt, context_chunks)
     if res:
-        return {"response": res, "model": f"Ollama ({settings.OLLAMA_MODEL})"}
+        return {"response": clean_robotic_intro(res), "model": f"Ollama ({settings.OLLAMA_MODEL})"}
 
     # Tier 2: Groq API
     res = await call_groq_api(prompt, context_chunks)
     if res:
-        return {"response": res, "model": f"Groq ({settings.GROQ_MODEL})"}
+        return {"response": clean_robotic_intro(res), "model": f"Groq ({settings.GROQ_MODEL})"}
 
     # Tier 3: Mistral API
     res = await call_mistral_api(prompt, context_chunks)
     if res:
-        return {"response": res, "model": f"Mistral ({settings.MISTRAL_MODEL})"}
+        return {"response": clean_robotic_intro(res), "model": f"Mistral ({settings.MISTRAL_MODEL})"}
 
     # Tier 4: Offline Fallback
     res = offline_heuristic_synthesizer(raw_query, context_chunks)
-    return {"response": res, "model": "Offline Semantic Synthesizer"}
+    return {"response": clean_robotic_intro(res), "model": "Offline Semantic Synthesizer"}
