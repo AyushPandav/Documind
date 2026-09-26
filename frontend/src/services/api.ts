@@ -287,3 +287,61 @@ export async function performFheSearch(
     return null;
   }
 }
+
+export interface VisualSearchResultItem {
+  chunk_id: string;
+  doc_id: string;
+  doc_name: string;
+  page_number: number;
+  visual_similarity_score: number;
+  category: string;
+  classification_confidence: number;
+  suggested_route: string;
+  pii_redacted: boolean;
+  faces_detected: number;
+  snippet: string;
+}
+
+export interface VisualSearchResponse {
+  query: string;
+  total_visual_pages: number;
+  results_count: number;
+  results: VisualSearchResultItem[];
+}
+
+/**
+ * Visual Multimodal Search using CLIP zero-shot raw image embeddings.
+ * Enables queries like 'find all pages with a pie chart' or 'show invoices with stamps'.
+ */
+export async function performVisualSearch(
+  query: string,
+  topK: number = 5,
+  minSimilarity: number = 0.15
+): Promise<VisualSearchResponse | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/documents/visual-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, top_k: topK, min_similarity: minSimilarity }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.log('[DocuMind API] Visual search offline:', err);
+    return null;
+  }
+}
+
+/**
+ * Fetch forensics & EXIF/DPI metadata alongside PII face redaction status for a document.
+ */
+export async function fetchDocumentForensics(docId: string): Promise<any | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/documents/${docId}/forensics`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.log('[DocuMind API] Forensics fetch offline:', err);
+    return null;
+  }
+}

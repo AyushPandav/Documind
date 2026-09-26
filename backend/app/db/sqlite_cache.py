@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS documents (
     pages INTEGER DEFAULT 1,
     status TEXT NOT NULL,
     progress INTEGER DEFAULT 0,
+    metadata_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -50,6 +51,8 @@ CREATE TABLE IF NOT EXISTS document_chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     embedding_json TEXT,
+    clip_embedding_json TEXT,
+    metadata_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -57,17 +60,40 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 async def init_sqlite_db():
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
         await db.executescript(CREATE_TABLES_SQL)
+
+        # Non-destructive migrations for existing SQLite databases
+        for col_def in [
+            ("documents", "metadata_json", "TEXT"),
+            ("document_chunks", "clip_embedding_json", "TEXT"),
+            ("document_chunks", "metadata_json", "TEXT"),
+        ]:
+            tbl, col, ctype = col_def
+            try:
+                await db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {ctype}")
+            except Exception:
+                pass
+
         await db.commit()
 
 # --- Document Operations ---
-async def save_document(doc_id: str, name: str, path: str, size: str, pages: int, status: str, progress: int = 0):
+async def save_document(
+    doc_id: str,
+    name: str,
+    path: str,
+    size: str,
+    pages: int,
+    status: str,
+    progress: int = 0,
+    doc_metadata: Optional[Dict[str, Any]] = None
+):
+    meta_str = json.dumps(doc_metadata or {})
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
         await db.execute(
             """
-            INSERT OR REPLACE INTO documents (id, name, path, size, pages, status, progress)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO documents (id, name, path, size, pages, status, progress, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (doc_id, name, path, size, pages, status, progress)
+            (doc_id, name, path, size, pages, status, progress, meta_str)
         )
         await db.commit()
 
@@ -84,14 +110,35 @@ async def get_all_documents() -> List[Dict[str, Any]]:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM documents ORDER BY created_at DESC") as cursor:
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            docs = []
+            for row in rows:
+                d = dict(row)
+                if d.get("metadata_json"):
+                    try:
+                        d["metadata"] = json.loads(d["metadata_json"])
+                    except Exception:
+                        d["metadata"] = {}
+                else:
+                    d["metadata"] = {}
+                docs.append(d)
+            return docs
 
 async def get_document(doc_id: str) -> Optional[Dict[str, Any]]:
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)) as cursor:
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            if row:
+                d = dict(row)
+                if d.get("metadata_json"):
+                    try:
+                        d["metadata"] = json.loads(d["metadata_json"])
+                    except Exception:
+                        d["metadata"] = {}
+                else:
+                    d["metadata"] = {}
+                return d
+            return None
 
 async def delete_document_and_chunks(doc_id: str) -> bool:
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
@@ -105,10 +152,15 @@ async def save_chunks(chunks: List[Dict[str, Any]]):
     async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
         for chunk in chunks:
             emb_str = json.dumps(chunk.get("embedding", []))
+            clip_emb_str = json.dumps(chunk.get("clip_embedding", []))
+            meta_str = json.dumps(chunk.get("metadata", {}))
             await db.execute(
                 """
-                INSERT OR REPLACE INTO document_chunks (id, doc_id, doc_name, page_number, chunk_index, content, embedding_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO document_chunks (
+                    id, doc_id, doc_name, page_number, chunk_index, content,
+                    embedding_json, clip_embedding_json, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chunk["id"],
@@ -117,7 +169,9 @@ async def save_chunks(chunks: List[Dict[str, Any]]):
                     chunk["page_number"],
                     chunk["chunk_index"],
                     chunk["content"],
-                    emb_str
+                    emb_str,
+                    clip_emb_str,
+                    meta_str
                 )
             )
         await db.commit()
@@ -135,10 +189,24 @@ async def get_all_chunks(doc_id: Optional[str] = None) -> List[Dict[str, Any]]:
             result = []
             for row in rows:
                 item = dict(row)
-                if item["embedding_json"]:
+                if item.get("embedding_json"):
                     item["embedding"] = json.loads(item["embedding_json"])
                 else:
                     item["embedding"] = []
+
+                if item.get("clip_embedding_json"):
+                    item["clip_embedding"] = json.loads(item["clip_embedding_json"])
+                else:
+                    item["clip_embedding"] = []
+
+                if item.get("metadata_json"):
+                    try:
+                        item["metadata"] = json.loads(item["metadata_json"])
+                    except Exception:
+                        item["metadata"] = {}
+                else:
+                    item["metadata"] = {}
+
                 result.append(item)
             return result
 

@@ -122,6 +122,7 @@ async def process_and_index_document(doc_id: str, file_path: str, file_name: str
             f"{max(0.1, round(os.path.getsize(file_path) / (1024 * 1024), 1))} MB"
             if os.path.exists(file_path) else "1.2 MB"
         )
+        doc_meta = pages_data[0].get("metadata", {}) if pages_data else {}
         await save_document(
             doc_id=doc_id,
             name=file_name,
@@ -129,7 +130,8 @@ async def process_and_index_document(doc_id: str, file_path: str, file_name: str
             size=file_size_mb,
             pages=pages_count,
             status="INDEXED",
-            progress=100
+            progress=100,
+            doc_metadata=doc_meta
         )
         t4_elapsed = time.monotonic() - t4
 
@@ -548,3 +550,93 @@ async def sync_documents_to_cloud(background_tasks: BackgroundTasks):
 async def get_cloud_sync_status():
     """Returns NeonDB PostgreSQL connection and sync status."""
     return neon_db.get_sync_status()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multimodal Visual Search & Forensics
+# ─────────────────────────────────────────────────────────────────────────────
+class VisualSearchRequest(BaseModel):
+    query: str
+    top_k: Optional[int] = 4
+    doc_filter: Optional[str] = None
+
+
+@router.post("/visual-search")
+async def visual_clip_search(request: VisualSearchRequest):
+    """
+    Multimodal Zero-Shot Visual Search via CLIP ViT-B/32:
+    Directly searches document pages and scanned images for visual semantics
+    (e.g., 'pie chart', 'invoices with red stamps', 'architectural diagram', 'handwritten notes')
+    without requiring OCR text extraction.
+    """
+    from app.rag.clip_embeddings import clip_service
+
+    all_chunks = await get_all_chunks()
+    if request.doc_filter:
+        all_chunks = [
+            c for c in all_chunks
+            if c.get("doc_name") == request.doc_filter
+            or c.get("doc_id") == request.doc_filter
+            or request.doc_filter.lower() in c.get("doc_name", "").lower()
+        ]
+
+    visual_chunks = [c for c in all_chunks if c.get("clip_embedding")]
+    if not visual_chunks:
+        return {
+            "query": request.query,
+            "total_visual_pages": 0,
+            "results": [],
+            "message": "No visual CLIP embeddings found in the indexed corpus. Upload scanned PDFs or images to enable visual search."
+        }
+
+    query_vec = clip_service.embed_text(request.query)
+    scored = []
+    for c in visual_chunks:
+        score = clip_service.compute_similarity(query_vec, c["clip_embedding"])
+        meta = c.get("metadata", {})
+        scored.append({
+            "chunk_id": c["id"],
+            "doc_id": c["doc_id"],
+            "doc_name": c["doc_name"],
+            "page_number": c["page_number"],
+            "visual_similarity_score": round(score, 4),
+            "category": meta.get("category", "image"),
+            "classification_confidence": meta.get("classification_confidence", 0.0),
+            "pii_redacted": meta.get("pii_redacted", False),
+            "faces_detected": meta.get("faces_detected", 0),
+            "dpi": meta.get("dpi", 72),
+            "scanner_make": meta.get("scanner_make"),
+            "content_preview": c["content"][:240].strip() + "..."
+        })
+
+    scored.sort(key=lambda x: x["visual_similarity_score"], reverse=True)
+    top_results = scored[:request.top_k]
+
+    return {
+        "query": request.query,
+        "total_visual_pages": len(visual_chunks),
+        "results_count": len(top_results),
+        "results": top_results
+    }
+
+
+@router.get("/{doc_id}/forensics")
+async def get_document_forensics(doc_id: str):
+    """
+    Returns digital forensic metadata, EXIF hardware parameters,
+    content-aware category, and PII face redaction logs for an uploaded document.
+    """
+    doc = await get_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    meta = doc.get("metadata", {})
+    return {
+        "doc_id": doc["id"],
+        "name": doc["name"],
+        "status": doc["status"],
+        "pages": doc["pages"],
+        "size": doc["size"],
+        "forensic_metadata": meta
+    }
+

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
-import { DocumentItem, ChatMessage, CitationSource, AuthUser } from '@/types';
+import { DocumentItem, ChatMessage, CitationSource, AuthUser, ChatSession } from '@/types';
 import { INITIAL_DOCUMENTS, INITIAL_MESSAGES, MOCK_KNOWLEDGE_BASE } from '@/data/mockData';
 import {
   checkBackendHealth,
@@ -9,6 +9,16 @@ import {
   sendQueryToBackend,
   performFheSearch,
 } from '@/services/api';
+import {
+  getLocalChatSessions,
+  saveLocalChatSessions,
+  getActiveSessionId,
+  saveActiveSessionId,
+  getSessionMessages,
+  saveSessionMessages,
+  deleteLocalChatSession,
+  clearAllLocalChats,
+} from '@/services/storage';
 
 interface AppContextType {
   // Auth
@@ -29,15 +39,25 @@ interface AppContextType {
   uploadingDocName: string | null;
   pickAndUploadDocument: () => Promise<void>;
 
-  // Chat
+  // Chat & Local Persistence
+  sessions: ChatSession[];
+  activeSessionId: string;
+  activeSession: ChatSession | null;
   messages: ChatMessage[];
   isGenerating: boolean;
   sendMessage: (text: string) => Promise<void>;
-  clearChat: () => void;
+  clearChat: () => Promise<void>;
+  createNewChat: (title?: string) => Promise<string>;
+  switchSession: (sessionId: string) => Promise<void>;
+  deleteChat: (sessionId: string) => Promise<void>;
+  renameChat: (sessionId: string, newTitle: string) => Promise<void>;
+  clearAllChats: () => Promise<void>;
 
   // Sheets
   isDocumentsSheetOpen: boolean;
   setIsDocumentsSheetOpen: (open: boolean) => void;
+  isChatHistorySheetOpen: boolean;
+  setIsChatHistorySheetOpen: (open: boolean) => void;
   activeCitationSource: CitationSource | null;
   activeCitationList: CitationSource[];
   isSourceSheetOpen: boolean;
@@ -61,16 +81,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadingDocName, setUploadingDocName] = useState<string | null>(null);
 
+  // Chat local persistence states
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string>('session-default');
   const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
   const [isGenerating, setIsGenerating] = useState(false);
 
   // Sheets
   const [isDocumentsSheetOpen, setIsDocumentsSheetOpen] = useState(false);
+  const [isChatHistorySheetOpen, setIsChatHistorySheetOpen] = useState(false);
   const [isSourceSheetOpen, setIsSourceSheetOpen] = useState(false);
   const [activeCitationSource, setActiveCitationSource] = useState<CitationSource | null>(null);
   const [activeCitationList, setActiveCitationList] = useState<CitationSource[]>([]);
 
-  // Check backend health & sync initial documents on mount
+  // 1. Initialize local chat sessions and load stored messages on boot
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSessionsFromStorage() {
+      try {
+        const storedSessions = await getLocalChatSessions();
+        if (!isMounted) return;
+        setSessions(storedSessions);
+
+        const storedActiveId = await getActiveSessionId();
+        const targetId =
+          storedActiveId && storedSessions.some((s) => s.id === storedActiveId)
+            ? storedActiveId
+            : storedSessions[0]?.id || 'session-default';
+
+        setActiveSessionId(targetId);
+        const storedMsgs = await getSessionMessages(targetId);
+        if (isMounted) {
+          setMessages(storedMsgs.length > 0 ? storedMsgs : INITIAL_MESSAGES);
+        }
+      } catch (err) {
+        console.warn('[AppContext] Failed to load local chats from storage:', err);
+      }
+    }
+    loadSessionsFromStorage();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // 2. Check backend health & sync initial documents on mount
   useEffect(() => {
     let isMounted = true;
     async function syncWithBackend() {
@@ -81,7 +135,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (isHealthy) {
         const backendDocs = await fetchBackendDocuments();
         if (backendDocs && backendDocs.length > 0 && isMounted) {
-          // Merge backend documents with initial list
           setDocuments((prev) => {
             const existingIds = new Set(backendDocs.map((d) => d.id));
             const uniqueInitial = prev.filter((d) => !existingIds.has(d.id));
@@ -130,73 +183,49 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setUploadingDocName(totalFiles > 1 ? `${totalFiles} documents` : (result.assets[0].name || 'document'));
       setUploadProgress(15);
 
-      const newDocs: DocumentItem[] = [];
+      const uploadedDocs: DocumentItem[] = [];
 
-      for (let i = 0; i < result.assets.length; i++) {
+      for (let i = 0; i < totalFiles; i++) {
         const asset = result.assets[i];
-        const fileName = asset.name || `uploaded_doc_${i + 1}`;
-        const fileSize = asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.2 MB';
-        const mimeType = asset.mimeType || 'application/octet-stream';
-        const docId = `doc-${Date.now()}-${i}`;
+        setUploadingDocName(asset.name || `file_${i + 1}`);
+        setUploadProgress(Math.round(((i + 0.3) / totalFiles) * 85));
 
-        // Estimate pages based on extension
-        const ext = fileName.split('.').pop()?.toLowerCase();
-        let estimatedPages = 1;
-        if (ext === 'pdf') {
-          estimatedPages = Math.floor(Math.random() * 20) + 3;
-        } else if (ext === 'docx' || ext === 'doc') {
-          estimatedPages = Math.floor(Math.random() * 8) + 2;
-        } else if (ext === 'pptx' || ext === 'ppt') {
-          estimatedPages = Math.floor(Math.random() * 12) + 4;
+        const backendDoc = await uploadDocumentToBackend(
+          asset.uri,
+          asset.name || `upload_${Date.now()}_${i}`,
+          asset.mimeType || 'application/octet-stream'
+        );
+
+        if (backendDoc) {
+          uploadedDocs.push(backendDoc);
+        } else {
+          const fallbackDoc: DocumentItem = {
+            id: `doc-${Date.now()}-${i}`,
+            name: asset.name || `document_${i + 1}`,
+            uri: asset.uri,
+            size: asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.2 MB',
+            pages: 1,
+            status: 'INDEXED',
+            uploadedAt: 'Just now',
+          };
+          uploadedDocs.push(fallbackDoc);
         }
 
-        const newDoc: DocumentItem = {
-          id: docId,
-          name: fileName,
-          uri: asset.uri,
-          size: fileSize,
-          pages: estimatedPages,
-          status: 'QUEUED',
-          progress: 20,
-          uploadedAt: 'Just now',
-        };
-
-        newDocs.push(newDoc);
-
-        // Upload to live backend asynchronously
-        uploadDocumentToBackend(asset.uri, fileName, mimeType)
-          .then((backendDoc) => {
-            if (backendDoc) {
-              setDocuments((prev) =>
-                prev.map((d) => (d.id === docId ? { ...d, id: backendDoc.id, status: 'INDEXED', progress: 100 } : d))
-              );
-            }
-          })
-          .catch((e) => console.log(`[DocuMind] Background upload for ${fileName}:`, e));
+        setUploadProgress(Math.round(((i + 1) / totalFiles) * 95));
       }
 
-      // Add all new documents to list immediately
-      setDocuments((prev) => [...newDocs, ...prev]);
-      if (newDocs.length > 0) {
-        setSelectedDocument(newDocs[0]);
+      setUploadProgress(100);
+      setDocuments((prev) => [...uploadedDocs, ...prev]);
+
+      if (uploadedDocs.length > 0) {
+        setSelectedDocument(uploadedDocs[0]);
       }
 
-      // Progress animation
       setTimeout(() => {
-        setUploadProgress(50);
-        setDocuments((prev) =>
-          prev.map((d) => (newDocs.some((nd) => nd.id === d.id) ? { ...d, status: 'PROCESSING', progress: 50 } : d))
-        );
-      }, 800);
-
-      setTimeout(() => {
-        setUploadProgress(100);
         setIsUploading(false);
+        setUploadProgress(0);
         setUploadingDocName(null);
-        setDocuments((prev) =>
-          prev.map((d) => (newDocs.some((nd) => nd.id === d.id) ? { ...d, status: 'INDEXED', progress: 100 } : d))
-        );
-      }, 1800);
+      }, 600);
     } catch (err) {
       console.error('Error selecting documents:', err);
       setIsUploading(false);
@@ -204,9 +233,160 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // Helper to persist current session's messages and metadata locally
+  const persistMessagesLocally = async (
+    targetSessionId: string,
+    updatedMessages: ChatMessage[],
+    userQueryPrompt?: string
+  ) => {
+    try {
+      await saveSessionMessages(targetSessionId, updatedMessages);
+      const lastMsg = updatedMessages[updatedMessages.length - 1];
+
+      setSessions((prevSessions) => {
+        let matched = false;
+        const nextSessions = prevSessions.map((s) => {
+          if (s.id === targetSessionId) {
+            matched = true;
+            let title = s.title;
+            if (
+              (!title || title === 'New Conversation' || title === 'New Chat') &&
+              userQueryPrompt
+            ) {
+              title =
+                userQueryPrompt.length > 30
+                  ? userQueryPrompt.slice(0, 30) + '...'
+                  : userQueryPrompt;
+            }
+            return {
+              ...s,
+              title,
+              messageCount: updatedMessages.length,
+              lastMessageSnippet: lastMsg ? lastMsg.content.slice(0, 60) : 'No messages',
+              updatedAt: new Date().toISOString(),
+            };
+          }
+          return s;
+        });
+
+        if (!matched) {
+          const newSession: ChatSession = {
+            id: targetSessionId,
+            title: userQueryPrompt ? (userQueryPrompt.length > 30 ? userQueryPrompt.slice(0, 30) + '...' : userQueryPrompt) : 'New Consultation',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            documentFilter: selectedDocument ? selectedDocument.name : null,
+            messageCount: updatedMessages.length,
+            lastMessageSnippet: lastMsg ? lastMsg.content.slice(0, 60) : 'No messages',
+          };
+          nextSessions.unshift(newSession);
+        }
+
+        saveLocalChatSessions(nextSessions);
+        return nextSessions;
+      });
+    } catch (e) {
+      console.warn('[AppContext] Failed to persist messages locally:', e);
+    }
+  };
+
+  // Chat Actions
+  const createNewChat = async (title?: string): Promise<string> => {
+    const newId = `session-${Date.now()}`;
+    const newSession: ChatSession = {
+      id: newId,
+      title: title || 'New Conversation',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      documentFilter: selectedDocument ? selectedDocument.name : null,
+      messageCount: 0,
+      lastMessageSnippet: 'Fresh consultation',
+    };
+
+    const nextSessions = [newSession, ...sessions];
+    setSessions(nextSessions);
+    setActiveSessionId(newId);
+    setMessages([]);
+
+    await saveLocalChatSessions(nextSessions);
+    await saveActiveSessionId(newId);
+    await saveSessionMessages(newId, []);
+
+    return newId;
+  };
+
+  const switchSession = async (sessionId: string) => {
+    if (sessionId === activeSessionId) return;
+    setActiveSessionId(sessionId);
+    await saveActiveSessionId(sessionId);
+    const stored = await getSessionMessages(sessionId);
+    setMessages(stored);
+  };
+
+  const deleteChat = async (sessionId: string) => {
+    await deleteLocalChatSession(sessionId);
+    const updated = sessions.filter((s) => s.id !== sessionId);
+    setSessions(updated);
+
+    if (activeSessionId === sessionId) {
+      if (updated.length > 0) {
+        const nextId = updated[0].id;
+        setActiveSessionId(nextId);
+        await saveActiveSessionId(nextId);
+        const msgs = await getSessionMessages(nextId);
+        setMessages(msgs);
+      } else {
+        await createNewChat('New Conversation');
+      }
+    }
+  };
+
+  const renameChat = async (sessionId: string, newTitle: string) => {
+    const updated = sessions.map((s) =>
+      s.id === sessionId ? { ...s, title: newTitle.trim(), updatedAt: new Date().toISOString() } : s
+    );
+    setSessions(updated);
+    await saveLocalChatSessions(updated);
+  };
+
+  const clearChat = async () => {
+    setMessages([]);
+    if (activeSessionId) {
+      await saveSessionMessages(activeSessionId, []);
+      const updated = sessions.map((s) =>
+        s.id === activeSessionId
+          ? { ...s, messageCount: 0, lastMessageSnippet: 'Chat cleared', updatedAt: new Date().toISOString() }
+          : s
+      );
+      setSessions(updated);
+      await saveLocalChatSessions(updated);
+    }
+  };
+
+  const clearAllChats = async () => {
+    await clearAllLocalChats();
+    const freshId = `session-${Date.now()}`;
+    const freshSession: ChatSession = {
+      id: freshId,
+      title: 'New Consultation',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      documentFilter: null,
+      messageCount: 0,
+      lastMessageSnippet: 'Started new chat',
+    };
+    setSessions([freshSession]);
+    setActiveSessionId(freshId);
+    setMessages([]);
+    await saveLocalChatSessions([freshSession]);
+    await saveActiveSessionId(freshId);
+    await saveSessionMessages(freshId, []);
+  };
+
   const sendMessage = async (text: string) => {
     if (!text.trim() || isGenerating) return;
 
+    const currentSessionId = activeSessionId;
     const userMessage: ChatMessage = {
       id: `msg-${Date.now()}`,
       role: 'user',
@@ -214,14 +394,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const messagesWithUser = [...messages, userMessage];
+    setMessages(messagesWithUser);
     setIsGenerating(true);
+    await persistMessagesLocally(currentSessionId, messagesWithUser, text.trim());
 
     try {
-      // 1. Attempt Real RAG execution via FastAPI Gateway
+      // 1. Real RAG execution via FastAPI Gateway
       const backendResult = await sendQueryToBackend(
         text.trim(),
-        selectedDocument ? selectedDocument.name : null
+        selectedDocument ? selectedDocument.name : null,
+        currentSessionId
       );
 
       if (backendResult) {
@@ -233,8 +416,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           isInsufficientInfo: backendResult.isInsufficientInfo,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
-        setMessages((prev) => [...prev, assistantMessage]);
+        const messagesWithAssistant = [...messagesWithUser, assistantMessage];
+        setMessages(messagesWithAssistant);
         setIsGenerating(false);
+        await persistMessagesLocally(currentSessionId, messagesWithAssistant);
         return;
       }
     } catch (apiErr) {
@@ -242,7 +427,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
 
     // 2. Offline Fallback Simulation
-    setTimeout(() => {
+    setTimeout(async () => {
       const lower = text.toLowerCase();
 
       const isInsufficient =
@@ -253,112 +438,106 @@ export function AppProvider({ children }: { children: ReactNode }) {
         lower.includes('alien') ||
         lower.includes('mars');
 
+      let assistantMessage: ChatMessage;
+
       if (isInsufficient) {
-        const insufficientMessage: ChatMessage = {
+        assistantMessage = {
           id: `msg-resp-${Date.now()}`,
           role: 'assistant',
           content: "I couldn't find enough information in the uploaded documents to answer this.",
           isInsufficientInfo: true,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
-        setMessages((prev) => [...prev, insufficientMessage]);
-        setIsGenerating(false);
-        return;
-      }
-
-      // Check against mock knowledge base
-      let matched = MOCK_KNOWLEDGE_BASE.find((entry) =>
-        entry.keywords.some((kw) => lower.includes(kw))
-      );
-
-      let assistantMessage: ChatMessage;
-
-      if (matched) {
-        assistantMessage = {
-          id: `msg-resp-${Date.now()}`,
-          role: 'assistant',
-          content: matched.answer,
-          citations: matched.citations,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
       } else {
-        // Check if asking for document description / summary
-        const isDescQuery =
-          lower.includes('what is') ||
-          lower.includes('about') ||
-          lower.includes('describe') ||
-          lower.includes('description') ||
-          lower.includes('summarize') ||
-          lower.includes('summary') ||
-          lower.includes('overview') ||
-          lower.includes('explain');
+        // Check against mock knowledge base
+        const matched = MOCK_KNOWLEDGE_BASE.find((entry) =>
+          entry.keywords.some((kw) => lower.includes(kw))
+        );
 
-        const targetDocName = selectedDocument ? selectedDocument.name : 'company_policy.pdf';
-
-        if (isDescQuery) {
+        if (matched) {
           assistantMessage = {
             id: `msg-resp-${Date.now()}`,
             role: 'assistant',
-            content: `This document, "${targetDocName}," serves as an authoritative guide covering key policies, procedures, and architectural standards [1]. It details implementation specifications, compliance obligations, and operational workflows designed to ensure seamless system execution [2].\n\nKey areas include core procedural requirements, security governance, and operational auditing protocols.`,
+            content: matched.answer,
+            citations: matched.citations,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            citations: [
-              {
-                id: `cite-${Date.now()}-1`,
-                index: 1,
-                documentId: selectedDocument?.id || 'doc-1',
-                documentName: targetDocName,
-                page: 1,
-                snippet: `Overview and general purpose of ${targetDocName}: Outlines the foundational architecture and guidelines.`,
-                relevance: 95,
-              },
-              {
-                id: `cite-${Date.now()}-2`,
-                index: 2,
-                documentId: selectedDocument?.id || 'doc-1',
-                documentName: targetDocName,
-                page: 3,
-                snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
-                relevance: 90,
-              },
-            ],
           };
         } else {
-          assistantMessage = {
-            id: `msg-resp-${Date.now()}`,
-            role: 'assistant',
-            content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            citations: [
-              {
-                id: `cite-${Date.now()}-1`,
-                index: 1,
-                documentId: selectedDocument?.id || 'doc-2',
-                documentName: targetDocName,
-                page: 15,
-                snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
-                relevance: 91,
-              },
-              {
-                id: `cite-${Date.now()}-2`,
-                index: 2,
-                documentId: selectedDocument?.id || 'doc-2',
-                documentName: targetDocName,
-                page: 19,
-                snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
-                relevance: 84,
-              },
-            ],
-          };
+          const isDescQuery =
+            lower.includes('what is') ||
+            lower.includes('about') ||
+            lower.includes('describe') ||
+            lower.includes('description') ||
+            lower.includes('summarize') ||
+            lower.includes('summary') ||
+            lower.includes('overview') ||
+            lower.includes('explain');
+
+          const targetDocName = selectedDocument ? selectedDocument.name : 'company_policy.pdf';
+
+          if (isDescQuery) {
+            assistantMessage = {
+              id: `msg-resp-${Date.now()}`,
+              role: 'assistant',
+              content: `This document, "${targetDocName}," serves as an authoritative guide covering key policies, procedures, and architectural standards [1]. It details implementation specifications, compliance obligations, and operational workflows designed to ensure seamless system execution [2].\n\nKey areas include core procedural requirements, security governance, and operational auditing protocols.`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              citations: [
+                {
+                  id: `cite-${Date.now()}-1`,
+                  index: 1,
+                  documentId: selectedDocument?.id || 'doc-1',
+                  documentName: targetDocName,
+                  page: 1,
+                  snippet: `Overview and general purpose of ${targetDocName}: Outlines the foundational architecture and guidelines.`,
+                  relevance: 95,
+                },
+                {
+                  id: `cite-${Date.now()}-2`,
+                  index: 2,
+                  documentId: selectedDocument?.id || 'doc-1',
+                  documentName: targetDocName,
+                  page: 3,
+                  snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                  relevance: 90,
+                },
+              ],
+            };
+          } else {
+            assistantMessage = {
+              id: `msg-resp-${Date.now()}`,
+              role: 'assistant',
+              content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              citations: [
+                {
+                  id: `cite-${Date.now()}-1`,
+                  index: 1,
+                  documentId: selectedDocument?.id || 'doc-2',
+                  documentName: targetDocName,
+                  page: 15,
+                  snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                  relevance: 91,
+                },
+                {
+                  id: `cite-${Date.now()}-2`,
+                  index: 2,
+                  documentId: selectedDocument?.id || 'doc-2',
+                  documentName: targetDocName,
+                  page: 19,
+                  snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
+                  relevance: 84,
+                },
+              ],
+            };
+          }
         }
       }
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      const finalMessages = [...messagesWithUser, assistantMessage];
+      setMessages(finalMessages);
       setIsGenerating(false);
+      await persistMessagesLocally(currentSessionId, finalMessages);
     }, 900);
-  };
-
-  const clearChat = () => {
-    setMessages([]);
   };
 
   const openSourceSheet = (source: CitationSource, allCitationsInMessage?: CitationSource[]) => {
@@ -379,6 +558,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return await performFheSearch(query, selectedDocument?.id);
   };
 
+  const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
+
   return (
     <AppContext.Provider
       value={{
@@ -394,12 +575,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         uploadProgress,
         uploadingDocName,
         pickAndUploadDocument,
+        sessions,
+        activeSessionId,
+        activeSession,
         messages,
         isGenerating,
         sendMessage,
         clearChat,
+        createNewChat,
+        switchSession,
+        deleteChat,
+        renameChat,
+        clearAllChats,
         isDocumentsSheetOpen,
         setIsDocumentsSheetOpen,
+        isChatHistorySheetOpen,
+        setIsChatHistorySheetOpen,
         activeCitationSource,
         activeCitationList,
         isSourceSheetOpen,

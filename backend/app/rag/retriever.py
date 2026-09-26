@@ -4,6 +4,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from rank_bm25 import BM25Okapi
 from app.rag.embeddings import embedding_service
+from app.rag.clip_embeddings import clip_service
 
 logger = logging.getLogger("DocuMind.Retriever")
 
@@ -21,13 +22,11 @@ def compute_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 
 class HybridRetriever:
     """
-    Hybrid Sparse (BM25) + Dense (Vector Cosine Similarity) Retriever
-    with Reciprocal Rank Fusion (RRF).
-
-    Logs each retrieval stage:
-      Step 1 — BM25 sparse keyword scoring
-      Step 2 — Dense cosine similarity scoring
-      Step 3 — Reciprocal Rank Fusion (RRF) score merging
+    Tri-brid Multimodal Retriever:
+      Lane 1 — Sparse Keyword Search (BM25Okapi)
+      Lane 2 — Dense Text Vector Similarity (SentenceTransformer MiniLM)
+      Lane 3 — Visual Cross-Modal Semantic Search (CLIP ViT-B/32)
+    Merged via 3-Way Reciprocal Rank Fusion (RRF).
     """
     def __init__(self, k_rrf: int = 60):
         self.k_rrf = k_rrf
@@ -49,7 +48,10 @@ class HybridRetriever:
         if doc_filter:
             filtered_chunks = [
                 c for c in chunks
-                if c.get("doc_name") == doc_filter or c.get("doc_id") == doc_filter
+                if c.get("doc_name") == doc_filter
+                or c.get("doc_id") == doc_filter
+                or doc_filter.lower() in c.get("doc_name", "").lower()
+                or c.get("doc_name", "").lower() in doc_filter.lower()
             ]
             if filtered_chunks:
                 logger.info(f"[Retriever] Doc filter '{doc_filter}': {len(filtered_chunks)}/{len(chunks)} chunks selected")
@@ -60,7 +62,7 @@ class HybridRetriever:
         n = len(chunks)
         logger.info(f"[Retriever] Query: '{query[:60]}...' | Corpus: {n} chunks | top_k: {top_k}")
 
-        # ── Step 1: Sparse BM25 Keyword Scoring ──────────────────────────────
+        # ── Lane 1: Sparse BM25 Keyword Scoring ──────────────────────────────
         t1 = time.monotonic()
         corpus_tokenized = [c["content"].lower().split() for c in chunks]
         bm25 = BM25Okapi(corpus_tokenized)
@@ -71,11 +73,11 @@ class HybridRetriever:
 
         top_bm25_score = float(bm25_scores[bm25_ranked_indices[0]]) if n > 0 else 0.0
         logger.info(
-            f"[Retriever] Step 1/3 BM25 Sparse — top score: {top_bm25_score:.4f} | "
+            f"[Retriever] Lane 1/3 BM25 Sparse — top score: {top_bm25_score:.4f} | "
             f"elapsed: {t1_elapsed*1000:.1f}ms"
         )
 
-        # ── Step 2: Dense Vector Cosine Scoring ──────────────────────────────
+        # ── Lane 2: Dense Text Vector Cosine Scoring ─────────────────────────
         t2 = time.monotonic()
         query_embedding = embedding_service.embed_text(query)
         dense_scores = []
@@ -90,43 +92,82 @@ class HybridRetriever:
 
         top_dense_score = float(dense_scores[dense_ranked_indices[0]]) if n > 0 else 0.0
         logger.info(
-            f"[Retriever] Step 2/3 Dense Vector — top cosine: {top_dense_score:.4f} | "
+            f"[Retriever] Lane 2/3 Dense Vector — top cosine: {top_dense_score:.4f} | "
             f"elapsed: {t2_elapsed*1000:.1f}ms"
         )
 
-        # ── Step 3: Reciprocal Rank Fusion (RRF) ─────────────────────────────
-        t3 = time.monotonic()
+        # ── Lane 3: Multimodal Visual CLIP Scoring ───────────────────────────
+        t3_clip = time.monotonic()
+        has_clip_chunks = any(bool(c.get("clip_embedding")) for c in chunks)
+        clip_scores = [0.0] * n
+        clip_ranked_indices = []
+
+        if has_clip_chunks:
+            query_clip_emb = clip_service.embed_text(query)
+            for idx, c in enumerate(chunks):
+                c_emb = c.get("clip_embedding", [])
+                if c_emb:
+                    clip_scores[idx] = clip_service.compute_similarity(query_clip_emb, c_emb)
+                else:
+                    clip_scores[idx] = 0.0
+            clip_ranked_indices = np.argsort(clip_scores)[::-1]
+            top_clip_score = float(clip_scores[clip_ranked_indices[0]])
+            t3_clip_elapsed = time.monotonic() - t3_clip
+            logger.info(
+                f"[Retriever] Lane 3/3 Visual CLIP — top cosine: {top_clip_score:.4f} | "
+                f"elapsed: {t3_clip_elapsed*1000:.1f}ms"
+            )
+
+        # ── Fusion: 3-Way Reciprocal Rank Fusion (RRF) ───────────────────────
+        t_fuse = time.monotonic()
         rrf_scores: Dict[int, float] = {}
+
         for rank, idx in enumerate(bm25_ranked_indices):
             rrf_scores[idx] = rrf_scores.get(idx, 0.0) + (1.0 / (self.k_rrf + rank + 1))
+
         for rank, idx in enumerate(dense_ranked_indices):
             rrf_scores[idx] = rrf_scores.get(idx, 0.0) + (1.0 / (self.k_rrf + rank + 1))
 
+        if has_clip_chunks and len(clip_ranked_indices) > 0:
+            for rank, idx in enumerate(clip_ranked_indices):
+                if clip_scores[idx] > 0.15:  # Only fuse meaningful visual matches
+                    rrf_scores[idx] = rrf_scores.get(idx, 0.0) + (1.2 / (self.k_rrf + rank + 1))
+
         sorted_indices = sorted(rrf_scores.keys(), key=lambda i: rrf_scores[i], reverse=True)
-        t3_elapsed = time.monotonic() - t3
+        t_fuse_elapsed = time.monotonic() - t_fuse
 
         # Build result list
         results = []
         for pos, idx in enumerate(sorted_indices[:top_k]):
             item = dict(chunks[idx])
             raw_dense = max(0.0, min(1.0, dense_scores[idx]))
-            relevance_pct = int(min(98, max(55, (raw_dense * 0.7 + (bm25_scores[idx] > 0) * 0.25 + 0.3) * 100)))
+            raw_clip = max(0.0, min(1.0, clip_scores[idx]))
+            has_bm25 = 1 if bm25_scores[idx] > 0 else 0
+
+            # Dynamic multi-lane weighted relevance percentage
+            relevance_pct = int(min(99, max(58, (
+                raw_dense * 0.45 +
+                has_bm25 * 0.25 +
+                raw_clip * 0.30 +
+                0.25
+            ) * 100)))
+
             item["relevance"] = relevance_pct
             item["dense_score"] = float(dense_scores[idx])
             item["bm25_score"] = float(bm25_scores[idx])
+            item["clip_score"] = float(clip_scores[idx])
             item["rrf_score"] = round(rrf_scores[idx], 6)
             results.append(item)
 
         total_elapsed = time.monotonic() - t_start
         logger.info(
-            f"[Retriever] Step 3/3 RRF Fusion — {len(results)} results returned | "
-            f"elapsed: {t3_elapsed*1000:.1f}ms | total: {total_elapsed*1000:.1f}ms"
+            f"[Retriever] Tri-brid RRF COMPLETE — {len(results)} items retrieved in {total_elapsed*1000:.1f}ms"
         )
         for r in results:
             logger.info(
                 f"  [{r.get('relevance', 0)}%] '{r['doc_name']}' p.{r['page_number']} — "
-                f"dense={r['dense_score']:.4f} bm25={r['bm25_score']:.4f} "
-                f"rrf={r['rrf_score']:.6f}"
+                f"dense={r['dense_score']:.3f} bm25={r['bm25_score']:.3f} "
+                f"clip={r.get('clip_score', 0):.3f} rrf={r['rrf_score']:.5f}"
             )
 
         return results

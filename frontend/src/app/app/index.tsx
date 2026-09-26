@@ -20,6 +20,7 @@ import { LoadingDots } from '@/components/LoadingDots';
 import { ChatInput } from '@/components/ChatInput';
 import { SourceSheet } from '@/components/SourceSheet';
 import { DocumentsSheet } from '@/components/DocumentsSheet';
+import { ChatsSheet } from '@/components/ChatsSheet';
 import { CitationSource } from '@/types';
 
 export default function MainAppScreen() {
@@ -36,11 +37,21 @@ export default function MainAppScreen() {
     uploadProgress,
     uploadingDocName,
     pickAndUploadDocument,
+    sessions,
+    activeSessionId,
+    activeSession,
     messages,
     isGenerating,
     sendMessage,
+    createNewChat,
+    switchSession,
+    deleteChat,
+    renameChat,
+    clearAllChats,
     isDocumentsSheetOpen,
     setIsDocumentsSheetOpen,
+    isChatHistorySheetOpen,
+    setIsChatHistorySheetOpen,
     activeCitationSource,
     activeCitationList,
     isSourceSheetOpen,
@@ -76,13 +87,45 @@ export default function MainAppScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-      {/* 7. Main App Header */}
+      {/* 1. Main App Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <DocuMindLogo size="compact" />
         </View>
 
         <View style={styles.headerRight}>
+          {/* Quick New Chat Button */}
+          <IconButton
+            onPress={() => createNewChat('New Conversation')}
+            icon={
+              <Ionicons
+                name="add"
+                size={20}
+                color={Colors.primaryCyan}
+              />
+            }
+            accessibilityLabel="Create new chat"
+          />
+
+          {/* Local Chat History Drawer Button */}
+          <IconButton
+            onPress={() => setIsChatHistorySheetOpen(true)}
+            active={isChatHistorySheetOpen}
+            badgeCount={sessions.length > 1 ? sessions.length : undefined}
+            icon={
+              <Ionicons
+                name="chatbubbles-outline"
+                size={18}
+                color={
+                  isChatHistorySheetOpen
+                    ? Colors.primaryCyan
+                    : Colors.textPrimary
+                }
+              />
+            }
+            accessibilityLabel="Open local chat history"
+          />
+
           {/* Documents Drawer Button */}
           <IconButton
             onPress={() => setIsDocumentsSheetOpen(true)}
@@ -158,7 +201,35 @@ export default function MainAppScreen() {
         </View>
       </View>
 
-      {/* Main Chat Screen with Keyboard Avoidance */}
+      {/* 2. Active Conversation Subheader Bar */}
+      <View style={styles.subHeaderBar}>
+        <Pressable
+          onPress={() => setIsChatHistorySheetOpen(true)}
+          style={({ pressed }) => [
+            styles.sessionPill,
+            pressed && styles.sessionPillPressed,
+          ]}
+        >
+          <Ionicons name="chatbubble-ellipses" size={13} color={Colors.primaryCyan} />
+          <Text style={styles.sessionPillText} numberOfLines={1}>
+            {activeSession?.title || 'Current Conversation'}
+          </Text>
+          <Ionicons name="chevron-down" size={13} color={Colors.textMuted} />
+        </Pressable>
+
+        <Pressable
+          onPress={() => createNewChat('New Conversation')}
+          style={({ pressed }) => [
+            styles.newChatPill,
+            pressed && styles.newChatPillPressed,
+          ]}
+        >
+          <Ionicons name="add" size={12} color={Colors.primaryCyan} />
+          <Text style={styles.newChatPillText}>New</Text>
+        </Pressable>
+      </View>
+
+      {/* 3. Main Chat Screen with Keyboard Avoidance */}
       <KeyboardAvoidingView
         style={styles.flexOne}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -166,7 +237,7 @@ export default function MainAppScreen() {
       >
         <View style={styles.chatContainer}>
           {messages.length === 0 ? (
-            /* 18. Empty Chat State */
+            /* Empty Chat State */
             <View style={styles.emptyContainer}>
               <View style={styles.emptyIconOutline}>
                 <Ionicons
@@ -176,26 +247,36 @@ export default function MainAppScreen() {
                 />
               </View>
               <Text style={styles.emptyTitle}>
-                Upload a document{'\n'}to get started
+                {selectedDocument
+                  ? `Ready to query\n${selectedDocument.name}`
+                  : 'Upload a document\nto get started'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                Upload a PDF or image and{'\n'}ask questions about it.
+                {selectedDocument
+                  ? 'Ask anything about this document.\nResponses and history are stored locally only.'
+                  : 'Upload a PDF, image, or document.\nYour chat is saved locally on device.'}
               </Text>
 
               <Pressable
                 onPress={() => setIsDocumentsSheetOpen(true)}
                 style={styles.emptyUploadButton}
               >
-                <Text style={styles.emptyUploadText}>+ Select Document</Text>
+                <Text style={styles.emptyUploadText}>
+                  {selectedDocument ? 'Switch Document' : '+ Select Document'}
+                </Text>
               </Pressable>
 
+              {/* Suggested Prompts */}
               <View style={styles.suggestedPromptsContainer}>
-                <Text style={styles.suggestedHeader}>OR TRY ASKING:</Text>
+                <Text style={styles.suggestedHeader}>SUGGESTED QUERIES</Text>
                 {samplePrompts.map((prompt, idx) => (
                   <Pressable
                     key={idx}
                     onPress={() => sendMessage(prompt)}
-                    style={styles.promptChip}
+                    style={({ pressed }) => [
+                      styles.promptChip,
+                      pressed && { opacity: 0.7 },
+                    ]}
                   >
                     <Text style={styles.promptChipText}>{prompt}</Text>
                   </Pressable>
@@ -203,19 +284,18 @@ export default function MainAppScreen() {
               </View>
             </View>
           ) : (
+            /* Message Feed */
             <FlatList
               ref={flatListRef}
               data={messages}
               keyExtractor={(item) => item.id}
-              contentContainerStyle={styles.messageList}
-              showsVerticalScrollIndicator={false}
               renderItem={({ item }) => (
                 <ChatMessageItem
                   message={item}
                   onCitationPress={handleCitationPress}
-                  activeCitationId={activeCitationSource?.id}
                 />
               )}
+              contentContainerStyle={styles.messageList}
               ListFooterComponent={
                 isGenerating ? (
                   <View style={styles.loadingContainer}>
@@ -226,7 +306,7 @@ export default function MainAppScreen() {
             />
           )}
 
-          {/* 19. Chat Input */}
+          {/* 11 & 12. Floating Chat Input Bar */}
           <ChatInput
             onSend={sendMessage}
             disabled={isGenerating}
@@ -236,7 +316,20 @@ export default function MainAppScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* 11 & 12. Sources Bottom Sheet */}
+      {/* Local Chat History Bottom Sheet */}
+      <ChatsSheet
+        visible={isChatHistorySheetOpen}
+        onClose={() => setIsChatHistorySheetOpen(false)}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        onSelectSession={switchSession}
+        onNewChat={() => createNewChat('New Conversation')}
+        onDeleteSession={deleteChat}
+        onRenameSession={renameChat}
+        onClearAllChats={clearAllChats}
+      />
+
+      {/* Sources Bottom Sheet */}
       <SourceSheet
         visible={isSourceSheetOpen}
         onClose={closeSourceSheet}
@@ -245,7 +338,7 @@ export default function MainAppScreen() {
         onSelectSource={(src) => openSourceSheet(src, activeCitationList)}
       />
 
-      {/* 13 & 14. Documents Bottom Sheet */}
+      {/* Documents Bottom Sheet */}
       <DocumentsSheet
         visible={isDocumentsSheetOpen}
         onClose={() => setIsDocumentsSheetOpen(false)}
@@ -292,6 +385,58 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  subHeaderBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: 'rgba(15, 23, 42, 0.65)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  sessionPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 240, 255, 0.18)',
+    borderRadius: 20,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    maxWidth: '80%',
+  },
+  sessionPillPressed: {
+    backgroundColor: 'rgba(0, 240, 255, 0.08)',
+  },
+  sessionPillText: {
+    fontFamily: Fonts.sans,
+    fontWeight: '600',
+    fontSize: 12,
+    color: Colors.textPrimary,
+    flexShrink: 1,
+  },
+  newChatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(0, 240, 255, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 240, 255, 0.25)',
+    borderRadius: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  newChatPillPressed: {
+    backgroundColor: 'rgba(0, 240, 255, 0.16)',
+  },
+  newChatPillText: {
+    fontFamily: Fonts.mono,
+    fontSize: 11,
+    fontWeight: '700',
+    color: Colors.primaryCyan,
   },
   chatContainer: {
     flex: 1,

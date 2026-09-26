@@ -69,7 +69,15 @@ def chunk_document_pages(
         p_num = page_item.get("page_number", 1)
         raw_text = page_item.get("content", "")
 
+        clip_emb = page_item.get("clip_embedding", [])
+        page_meta = page_item.get("metadata", {})
+
         text_chunks = recursive_chunk_text(raw_text)
+        if not text_chunks and raw_text:
+            text_chunks = [raw_text]
+        elif not text_chunks:
+            text_chunks = [f"[Visual content from {doc_name} page {p_num}]"]
+
         for text in text_chunks:
             chunk_id = f"{doc_id}-chunk-{chunk_counter}"
             all_chunks.append({
@@ -79,7 +87,9 @@ def chunk_document_pages(
                 "page_number": p_num,
                 "chunk_index": chunk_counter,
                 "content": text,
-                "source_tag": f"[DOC: {doc_name} | PAGE: {p_num}]"
+                "source_tag": f"[DOC: {doc_name} | PAGE: {p_num}]",
+                "clip_embedding": clip_emb,
+                "metadata": page_meta
             })
             chunk_counter += 1
 

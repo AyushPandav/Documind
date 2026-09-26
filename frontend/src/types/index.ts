@@ -30,6 +30,16 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  documentFilter?: string | null;
+  messageCount: number;
+  lastMessageSnippet?: string;
+}
+
 export interface AuthUser {
   email: string;
   token: string;
