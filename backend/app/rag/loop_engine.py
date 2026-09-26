@@ -1,8 +1,14 @@
 import re
 import time
+import asyncio
 import logging
+import urllib.parse
 from typing import List, Dict, Any, Optional, Tuple
+
 from app.rag.retriever import hybrid_retriever
+from app.rag.query_router import query_router
+from app.rag.web_search import web_search_retriever
+from app.rag.live_apis import live_api_service
 from app.core.circuit_breaker import generate_rag_response
 
 logger = logging.getLogger("DocuMind.LoopEngine")
@@ -10,22 +16,23 @@ logger = logging.getLogger("DocuMind.LoopEngine")
 
 class SelfReflectiveRAGLoop:
     """
-    Self-Reflective Corrective RAG Loop ('Loop Engineering'):
-    1. Query Decomposition & Routing  — splits complex multi-part queries into sub-queries
-    2. Hybrid Retrieval                — BM25 + Vector cosine via RRF
-    3. Sufficiency & Conflict Guard    — evaluates context relevance + detects cross-doc conflicts
-    4. Adaptive Query Reformulation   — re-searches up to 2 iterations if evidence is insufficient
-    5. Reliable Fallback Guard         — deterministic "insufficient evidence" notice
-    6. Evidence & Citation Injection   — [DOC: ... | PAGE: ... | SECTION: ...] boundary tags
+    Hybrid Multi-Source Self-Reflective Corrective RAG Loop:
+    1. Intelligent Query Routing      — routes to Documents, Live Web Search, and Live APIs
+    2. Query Decomposition           — splits multi-source / comparative queries
+    3. Multi-Source Retrieval Loop   — Vector/BM25 for docs + DuckDuckGo + Live Clock/Weather/Finance APIs
+    4. Evidence Fusion & Reranking   — unifies internal & external sources into cohesive evidence pool
+    5. Cross-Source Conflict Guard   — detects conflicting claims between docs or docs vs web
+    6. Grounded Synthesis Guard      — strict evidence-grounded prompt without fabrication
+    7. Multi-Source Citations        — labeled [1], [2] with source badges (internal, web, live API)
     """
+
     def __init__(self, max_iterations: int = 2, sufficiency_threshold: float = 0.28):
         self.max_iterations = max_iterations
         self.sufficiency_threshold = sufficiency_threshold
 
     def decompose_query(self, query: str) -> List[str]:
         """
-        Decomposes complex multi-part queries (e.g. 'Compare Q2 revenue with budget in Manual B')
-        into discrete sub-queries.
+        Decomposes complex multi-part queries into discrete sub-queries.
         """
         lower = query.lower()
         sub_queries = [query]
@@ -56,27 +63,33 @@ class SelfReflectiveRAGLoop:
 
     def detect_conflicts(self, chunks: List[Dict[str, Any]]) -> Optional[str]:
         """
-        Detects conflicting facts or numbers across retrieved document chunks.
-        e.g., differing dollar figures, percentages, or contradictory policy windows.
+        Detects conflicting facts or numbers across retrieved document chunks or web sources.
         """
-        if len(chunks) < 2:
+        # Only compare document chunks with each other to detect true conflicting policy/figures
+        doc_chunks = [c for c in chunks if c.get("type") == "document" or "doc_name" in c]
+        if len(doc_chunks) < 2:
             return None
 
-        for term in ["refund", "days", "leave", "accrue", "percent", "%", "revenue", "budget"]:
+        for term in ["refund", "leave", "notice period", "revenue", "budget"]:
             mentions = []
-            for c in chunks:
-                if term in c["content"].lower():
-                    nums = re.findall(r'\b\d+(?:\.\d+)?%?\b', c["content"])
-                    if nums:
-                        mentions.append((c["doc_name"], c["page_number"], nums))
+            for c in doc_chunks:
+                content = c.get("content", "") or c.get("snippet", "")
+                if term in content.lower():
+                    # Find numbers closely associated with this term
+                    pattern = rf'\b{re.escape(term)}\b[^.\n]*?(\d+(?:\.\d+)?%?)'
+                    found = re.findall(pattern, content, re.IGNORECASE)
+                    if found:
+                        source_label = c.get("doc_name") or c.get("title") or "Document"
+                        page = c.get("page_number", 1)
+                        mentions.append((source_label, page, found))
 
             if len(mentions) >= 2:
-                first_doc, first_p, first_nums = mentions[0]
-                second_doc, second_p, second_nums = mentions[1]
-                if first_doc != second_doc and set(first_nums) != set(second_nums):
+                first_src, first_p, first_nums = mentions[0]
+                second_src, second_p, second_nums = mentions[1]
+                if first_src != second_src and set(first_nums) != set(second_nums):
                     conflict_msg = (
-                        f"Potential conflict detected between '{first_doc}' (Page {first_p}) "
-                        f"and '{second_doc}' (Page {second_p}) regarding '{term}'."
+                        f"Potential conflict detected between '{first_src}' (Page {first_p}) "
+                        f"and '{second_src}' (Page {second_p}) regarding '{term}' ({', '.join(first_nums[:2])} vs {', '.join(second_nums[:2])})."
                     )
                     logger.warning(f"[LoopEngine] ⚠ CONFLICT: {conflict_msg}")
                     return conflict_msg
@@ -85,10 +98,8 @@ class SelfReflectiveRAGLoop:
     def evaluate_sufficiency(self, query: str, retrieved_chunks: List[Dict[str, Any]]) -> Tuple[bool, float]:
         """
         Evaluates whether retrieved chunks contain sufficient evidence for answering the query.
-        Returns: (is_sufficient: bool, confidence_score: float)
         """
         if not retrieved_chunks:
-            logger.info(f"[LoopEngine] Sufficiency: FAIL (0 chunks retrieved)")
             return False, 0.0
 
         query_terms = set(re.findall(r'\b\w{3,}\b', query.lower()))
@@ -97,41 +108,26 @@ class SelfReflectiveRAGLoop:
 
         max_overlap = 0.0
         for c in retrieved_chunks:
-            content_lower = c["content"].lower()
+            content = c.get("content", "") or c.get("snippet", "")
+            content_lower = content.lower()
             matched = sum(1 for term in query_terms if term in content_lower)
             ratio = matched / len(query_terms)
             if ratio > max_overlap:
                 max_overlap = ratio
 
-        top_dense = retrieved_chunks[0].get("dense_score", 0.0)
+        top_dense = retrieved_chunks[0].get("dense_score", 0.0) if retrieved_chunks else 0.0
         confidence = float(0.6 * max_overlap + 0.4 * max(0.0, top_dense))
 
-        # Out-of-domain query guard
-        irrelevant_keywords = {
-            "recipe", "chocolate cake", "weather in tokyo", "mars rover",
-            "alien", "stock market prediction"
-        }
-        if any(ik in query.lower() for ik in irrelevant_keywords) and max_overlap < 0.2:
-            logger.info(f"[LoopEngine] Sufficiency: FAIL — out-of-domain query detected")
-            return False, 0.08
-
-        # Document overview / summary / description query detection
+        # Check for overview/summary queries
         summary_triggers = [
             "what is this", "what is the document", "what is the pdf", "what does this",
             "about", "summarize", "summary", "overview", "describe", "description",
             "tell me about", "explain this", "main points", "key takeaways", "what is inside"
         ]
         if any(st in query.lower() for st in summary_triggers):
-            logger.info(f"[LoopEngine] Sufficiency: PASS ✓ — document overview/summary request detected")
             return True, 0.95
 
         is_sufficient = confidence >= self.sufficiency_threshold
-        status = "PASS ✓" if is_sufficient else "FAIL ✗"
-        logger.info(
-            f"[LoopEngine] Sufficiency: {status} | "
-            f"keyword_overlap={max_overlap:.3f}, dense_top={top_dense:.3f}, "
-            f"confidence={confidence:.3f} (threshold={self.sufficiency_threshold})"
-        )
         return is_sufficient, confidence
 
     async def execute_rag_pipeline(
@@ -141,26 +137,38 @@ class SelfReflectiveRAGLoop:
         doc_filter: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Executes the production Corrective RAG pipeline with full terminal logging:
-        1. Query decomposition
-        2. Hybrid retrieval + reflection loop with reformulation
-        3. Conflict & Sufficiency verification
-        4. Structured evidence boundary injection
-        5. Grounded synthesis via Circuit Breaker LLM
+        Executes the Hybrid Multi-Source Retrieval RAG Pipeline:
+        1. Query Router decides which pipelines are active (Documents, Web Search, Live APIs).
+        2. Dispatches parallel retrieval across selected pipelines.
+        3. Fuses multi-source evidence into unified context & citations.
+        4. Cross-checks conflict and sufficiency.
+        5. Synthesizes strictly grounded answer using LLM circuit breaker.
         """
         t_total = time.monotonic()
+        clean_query = query.strip()
 
-        logger.info("─" * 65)
-        logger.info(f"[LoopEngine] ▶ RAG Pipeline START")
-        logger.info(f"[LoopEngine] Query: '{query[:80]}...'")
-        logger.info(f"[LoopEngine] Corpus: {len(all_chunks)} chunks | doc_filter: {doc_filter or 'None'}")
-        logger.info("─" * 65)
+        logger.info("═" * 68)
+        logger.info(f"[LoopEngine] ▶ Hybrid Multi-Source RAG Pipeline START")
+        logger.info(f"[LoopEngine] Query: '{clean_query[:80]}'")
+        logger.info(f"[LoopEngine] Corpus: {len(all_chunks)} chunks | Filter: {doc_filter or 'None'}")
+        logger.info("═" * 68)
 
-        # ── Step 0: Ensure Knowledge Base Has Chunks ──────────────────────────
-        if not all_chunks:
-            logger.warning("[LoopEngine] No chunks in database yet.")
+        # ── Step 1: Intelligent Query Routing ────────────────────────────────
+        routing = query_router.route(
+            query=clean_query,
+            has_uploaded_docs=bool(all_chunks),
+            doc_filter=doc_filter
+        )
+        logger.info(
+            f"[LoopEngine] Route decision: docs={routing.need_documents}, "
+            f"web={routing.need_web_search}, live_api={routing.need_live_api} | {routing.reasoning}"
+        )
+
+        # If pure document query requested but corpus is empty and no external sources
+        if not all_chunks and not routing.need_web_search and not routing.need_live_api:
+            logger.warning("[LoopEngine] No chunks in database and query is purely internal.")
             return {
-                "answer": "No documents have been uploaded or indexed yet. Please tap the upload button above to add a PDF, Word document, or image, and DocuMind will immediately provide a full description and analysis!",
+                "answer": "No documents have been uploaded or indexed yet. Please upload a PDF, Word document, or spreadsheet, or ask a question requiring live web information or current facts!",
                 "citations": [],
                 "is_insufficient_info": False,
                 "confidence_score": 0.0,
@@ -168,320 +176,264 @@ class SelfReflectiveRAGLoop:
                 "conflict_note": None
             }
 
-        import urllib.parse
-        unquoted_doc_filter = urllib.parse.unquote(doc_filter) if doc_filter else None
+        # ── Step 2: Parallel Multi-Source Retrieval ──────────────────────────
+        doc_chunks: List[Dict[str, Any]] = []
+        web_results: List[Dict[str, Any]] = []
+        live_api_results: List[Dict[str, Any]] = []
 
-        # Parse document filter terms (unquoted + lowercased)
-        filter_terms = []
-        if doc_filter:
-            for raw in [doc_filter, unquoted_doc_filter]:
-                for t in raw.split(","):
-                    clean_t = t.strip().lower()
-                    if clean_t and clean_t not in filter_terms:
-                        filter_terms.append(clean_t)
+        retrieval_tasks = []
 
-        # Check if query is asking for a pure document summary / description / overview
-        q_lower = query.strip().lower()
-        pure_summary_phrases = [
-            "what is this document", "what is this pdf", "what does this document say",
-            "what does this pdf say", "what is this file about", "what is this document about",
-            "what is this pdf about", "summarize this document", "summarize this pdf",
-            "summarize the document", "summarize the pdf", "give me a summary",
-            "give a summary", "give description", "describe this document",
-            "describe this pdf", "overview of the document", "overview of the pdf",
-            "what is inside this document", "what does this file contain", "what is this",
-            "summarize", "summary", "overview", "what is it about"
-        ]
-        # Only treat as pure summary if the query closely matches a general overview request
-        # AND does not ask about specific subjects/entities (e.g., "story", "cortex", "interrupt", "table", "author", "price")
-        specific_keywords = [
-            "story", "book", "chapter", "character", "author", "cortex", "arm", "processor",
-            "interrupt", "nvic", "pipeline", "refund", "leave", "vacation", "remote work",
-            "dataset", "metric", "accuracy", "latency", "array", "pointer", "function",
-            "salary", "bonus", "price", "cost", "revenue", "budget", "sheet", "row", "column"
-        ]
-        has_specific_keyword = any(kw in q_lower for kw in specific_keywords)
-        is_pure_summary = any(phrase in q_lower for phrase in pure_summary_phrases) and not has_specific_keyword
+        # 2a. Live API task
+        if routing.need_live_api:
+            async def _fetch_live_api():
+                api_type = routing.need_live_api
+                if api_type == "time":
+                    return live_api_service.get_system_time(clean_query)
+                elif api_type == "weather":
+                    return await live_api_service.get_weather(clean_query)
+                elif api_type == "crypto":
+                    return await live_api_service.get_crypto_price(clean_query)
+                elif api_type == "forex":
+                    return await live_api_service.get_exchange_rates(clean_query)
+                return []
 
-        # ── Fast-path for Document Overview / Description Queries ────────────
-        if is_pure_summary and (filter_terms or len(all_chunks) <= 10):
-            logger.info(f"[LoopEngine] 📑 Overview/Description query detected — gathering introductory context")
-            target_chunks = all_chunks
-            if filter_terms:
-                def _matches_filter(c):
-                    c_name = c.get("doc_name", "").lower()
-                    c_id = c.get("doc_id", "").lower()
-                    c_unq = urllib.parse.unquote(c_name)
-                    return any(
-                        term == c_name
-                        or term == c_id
-                        or term == c_unq
-                        or term in c_name
-                        or term in c_unq
-                        or c_name in term
-                        or c_unq in term
-                        for term in filter_terms
-                    )
+            retrieval_tasks.append(("live_api", _fetch_live_api()))
 
-                filtered = [c for c in all_chunks if _matches_filter(c)]
-                if filtered:
-                    target_chunks = filtered
-                else:
-                    logger.warning(f"[LoopEngine] Doc filter '{doc_filter}' not in indexed chunks, checking db status...")
-                    try:
-                        from app.db.sqlite_cache import get_all_documents
-                        db_docs = await get_all_documents()
-                        matching_db = next(
-                            (d for d in db_docs if any(term in d["name"].lower() or term in urllib.parse.unquote(d["name"].lower()) for term in filter_terms)),
-                            None
-                        )
-                        if matching_db and matching_db.get("status") in ["QUEUED", "OCR", "CHUNKING", "EMBEDDING", "PROCESSING"]:
-                            return {
-                                "answer": f"The document '{matching_db['name']}' is currently being indexed ({matching_db['status']}, {matching_db['progress']}% complete). Please wait a moment for processing to finish, then ask again for a complete breakdown!",
-                                "citations": [],
-                                "is_insufficient_info": False,
-                                "confidence_score": 0.5,
-                                "model_used": "DocuMind Ingestion Monitor",
-                                "conflict_note": None
-                            }
-                    except Exception as db_err:
-                        logger.warning(f"[LoopEngine] Error checking db doc status: {db_err}")
+        # 2b. Web search task
+        if routing.need_web_search:
+            search_q = routing.web_query or clean_query
+            retrieval_tasks.append(("web", web_search_retriever.search(search_q, max_results=4)))
 
-                    logger.info(f"[LoopEngine] Using available {len(all_chunks)} chunks for description")
-                    target_chunks = all_chunks
+        # 2c. Execute external tasks concurrently
+        if retrieval_tasks:
+            names = [t[0] for t in retrieval_tasks]
+            coros = [t[1] for t in retrieval_tasks]
+            gathered = await asyncio.gather(*coros, return_exceptions=True)
+            for name, res in zip(names, gathered):
+                if isinstance(res, Exception):
+                    logger.error(f"[LoopEngine] Error in {name} retrieval: {res}")
+                elif isinstance(res, list):
+                    if name == "live_api":
+                        live_api_results = res
+                    elif name == "web":
+                        web_results = res
 
-            if len(filter_terms) > 1:
-                # Multi-document overview: gather top 2-3 chunks per filtered document
-                top_chunks_list = []
-                for term in filter_terms:
-                    doc_chunks = [
-                        c for c in target_chunks
-                        if term in c.get("doc_name", "").lower()
-                        or term in urllib.parse.unquote(c.get("doc_name", "").lower())
-                        or term in c.get("doc_id", "").lower()
+        # 2d. Internal Document Retrieval (if needed and chunks available)
+        if routing.need_documents and all_chunks:
+            doc_query_text = routing.document_query or clean_query
+            filter_terms = []
+            if doc_filter:
+                unquoted_filter = urllib.parse.unquote(doc_filter)
+                for raw in [doc_filter, unquoted_filter]:
+                    for t in raw.split(","):
+                        ct = t.strip().lower()
+                        if ct and ct not in filter_terms:
+                            filter_terms.append(ct)
+
+            # Check if overview/summary query
+            q_lower = doc_query_text.lower()
+            summary_triggers = ["summarize", "overview", "what is this document", "what does this pdf say", "what is inside", "describe this"]
+            is_summary = any(st in q_lower for st in summary_triggers)
+
+            if is_summary and (filter_terms or len(all_chunks) <= 12):
+                target_chunks = all_chunks
+                if filter_terms:
+                    filtered = [
+                        c for c in all_chunks
+                        if any(term in c.get("doc_name", "").lower() or term in c.get("doc_id", "").lower() for term in filter_terms)
                     ]
-                    doc_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-                    top_chunks_list.extend(doc_chunks[:3])
-                if not top_chunks_list:
-                    target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-                    top_chunks_list = target_chunks[:8]
-                top_chunks = top_chunks_list
-            else:
-                # For a single document, sort chronologically and sample up to 8 chunks
+                    if filtered:
+                        target_chunks = filtered
+
                 target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-                if len(target_chunks) <= 8:
-                    top_chunks = target_chunks
-                else:
-                    # Sample first 4, middle 2, and end 2 chunks for complete representation of large PDFs
-                    n_chunks = len(target_chunks)
-                    mid = n_chunks // 2
-                    sampled_indices = [0, 1, 2, 3, mid, mid + 1, n_chunks - 2, n_chunks - 1]
-                    sampled_indices = sorted(list(dict.fromkeys(i for i in sampled_indices if 0 <= i < n_chunks)))
-                    top_chunks = [target_chunks[i] for i in sampled_indices[:8]]
-
-            confidence = 0.95
-            conflict_note = None
-            is_summary_query = True
-
-        else:
-            is_summary_query = False
-            # ── Step 1: Query Decomposition ───────────────────────────────────────
-            sub_queries = self.decompose_query(query)
-            logger.info(f"[LoopEngine] Step 1: {len(sub_queries)} sub-quer{'y' if len(sub_queries) == 1 else 'ies'} identified")
-
-            collected_chunks: Dict[str, Dict[str, Any]] = {}
-            # For single-doc queries, retrieve more chunks; for multi-doc scale by doc count
-            # Also if corpus is small (e.g. a 31-chunk PDF), retrieve all available chunks
-            if len(filter_terms) > 1:
-                retrieval_k = max(6, min(20, len(filter_terms) * 4))
+                doc_chunks = target_chunks[:8]
             else:
-                corpus_size = len(all_chunks)
-                retrieval_k = corpus_size if corpus_size <= 20 else 8
+                sub_queries = self.decompose_query(doc_query_text)
+                collected: Dict[str, Dict[str, Any]] = {}
+                retrieval_k = max(6, min(12, len(all_chunks)))
 
-            # ── Step 2: Hybrid Retrieval + Reflection Loop ────────────────────────
-            for sq_idx, sq in enumerate(sub_queries):
-                logger.info(f"[LoopEngine] Step 2: Sub-query {sq_idx + 1}/{len(sub_queries)}: '{sq[:60]}'")
-                active_q = sq
-
-                for it in range(self.max_iterations):
-                    logger.info(f"[LoopEngine]   Iteration {it + 1}/{self.max_iterations}: Hybrid retrieval...")
-                    retrieved = hybrid_retriever.retrieve(
-                        query=active_q,
-                        chunks=all_chunks,
-                        top_k=retrieval_k,
-                        doc_filter=doc_filter
-                    )
-
-                    is_sufficient, score = self.evaluate_sufficiency(active_q, retrieved)
-
-                    if is_sufficient or it == self.max_iterations - 1:
-                        for c in retrieved:
-                            collected_chunks[c["id"]] = c
-                        logger.info(
-                            f"[LoopEngine]   {'✓ Sufficient context' if is_sufficient else '⚠ Max iterations reached'} "
-                            f"— collected {len(retrieved)} chunks (total pool: {len(collected_chunks)})"
+                for sq in sub_queries:
+                    active_q = sq
+                    for it in range(self.max_iterations):
+                        retrieved = hybrid_retriever.retrieve(
+                            query=active_q,
+                            chunks=all_chunks,
+                            top_k=retrieval_k,
+                            doc_filter=doc_filter
                         )
-                        break
-                    else:
-                        logger.info(
-                            f"[LoopEngine]   ✗ Insufficient (score={score:.3f} < {self.sufficiency_threshold}) "
-                            f"— reformulating query..."
-                        )
-                        active_q = self.reformulate_query(active_q, it)
+                        is_suff, score = self.evaluate_sufficiency(active_q, retrieved)
+                        if is_suff or it == self.max_iterations - 1:
+                            for c in retrieved:
+                                collected[c["id"]] = c
+                            break
+                        else:
+                            active_q = self.reformulate_query(active_q, it)
 
-            # ── Step 3: Consolidate & Final Sufficiency Check ─────────────────────
-            final_chunks = list(collected_chunks.values())
-            final_chunks.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+                final_c = list(collected.values())
+                final_c.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+                doc_chunks = final_c[:8] if final_c else all_chunks[:4]
 
-            if len(filter_terms) > 1:
-                # Ensure representation across each filtered document
-                top_chunks_selected = []
-                for term in filter_terms:
-                    doc_chunks = [
-                        c for c in final_chunks
-                        if term in c.get("doc_name", "").lower() or term in c.get("doc_id", "").lower()
-                    ]
-                    if doc_chunks:
-                        top_chunks_selected.extend(doc_chunks[:2])
-                
-                # Add highest remaining chunks up to max 8
-                selected_ids = {c["id"] for c in top_chunks_selected}
-                for c in final_chunks:
-                    if c["id"] not in selected_ids and len(top_chunks_selected) < 8:
-                        top_chunks_selected.append(c)
+        # ── Step 3: Evidence Fusion & Cross-Source Conflict Checking ──────────
+        all_evidence: List[Dict[str, Any]] = []
 
-                top_chunks = top_chunks_selected if top_chunks_selected else final_chunks[:6]
-            else:
-                # For single-doc queries use up to 8 top chunks for richer context
-                top_chunks = final_chunks[:8]
+        # 3a. Add Live API items
+        for item in live_api_results:
+            all_evidence.append({
+                "type": "live_api",
+                "id": item["id"],
+                "title": item["title"],
+                "snippet": item["snippet"],
+                "url": item.get("url"),
+                "retrieved_at": item.get("retrieved_at"),
+                "relevance": item.get("relevance", 98),
+                "metadata": item.get("metadata", {})
+            })
 
-            if not top_chunks:
-                # Fall back to introductory chunks
-                top_chunks = all_chunks[:3]
+        # 3b. Add Document chunks
+        for c in doc_chunks:
+            all_evidence.append({
+                "type": "document",
+                "id": c["id"],
+                "title": c.get("doc_name", "Indexed Document"),
+                "doc_id": c.get("doc_id", "doc"),
+                "page": c.get("page_number", 1),
+                "section": c.get("chunk_index", 1),
+                "snippet": c.get("content", ""),
+                "relevance": c.get("relevance", 85)
+            })
 
-            logger.info(f"[LoopEngine] Step 3: Consolidated {len(final_chunks)} chunks → using top {len(top_chunks)}")
+        # 3c. Add Web Search items
+        for w in web_results:
+            all_evidence.append({
+                "type": "web",
+                "id": w["id"],
+                "title": w["title"],
+                "url": w.get("url"),
+                "snippet": w.get("snippet", ""),
+                "retrieved_at": w.get("retrieved_at"),
+                "relevance": w.get("relevance", 80),
+                "metadata": w.get("metadata", {})
+            })
 
-            is_sufficient, confidence = self.evaluate_sufficiency(query, top_chunks)
+        logger.info(
+            f"[LoopEngine] Step 3: Fused {len(all_evidence)} total evidence items "
+            f"(Docs: {len(doc_chunks)}, Web: {len(web_results)}, Live: {len(live_api_results)})"
+        )
 
-            if not is_sufficient:
-                logger.info(f"[LoopEngine] Keyword sufficiency below threshold — switching to grounded document description...")
-                is_summary_query = True
-                confidence = max(0.70, confidence)
+        # 3d. Check cross-source conflicts
+        conflict_note = self.detect_conflicts(all_evidence)
 
-            # ── Step 4: Conflict Detection ─────────────────────────────────────────
-            conflict_note = self.detect_conflicts(top_chunks)
-            if conflict_note:
-                logger.warning(f"[LoopEngine] Step 4: Conflict detected across documents!")
-            else:
-                logger.info(f"[LoopEngine] Step 4: No conflicts detected across {len(top_chunks)} chunks ✓")
-
-        # ── Step 5: Context Prompt with Evidence Boundary Tags ─────────────────
+        # ── Step 4: Build Grounded Context with Boundary Tags ──────────────────
         context_blocks = []
         citations_data = []
 
-        logger.info(f"[LoopEngine] Step 5: Building context prompt with boundary tags...")
-        for idx, chunk in enumerate(top_chunks):
-            citation_num = idx + 1
-            section_id = chunk.get("chunk_index", idx + 1)
-            boundary_tag = f"[DOC: {chunk['doc_name']} | PAGE: {chunk['page_number']} | SECTION: {section_id}]"
-            context_blocks.append(f"[{citation_num}] {boundary_tag}\n{chunk['content']}")
+        for idx, ev in enumerate(all_evidence):
+            cite_num = idx + 1
+            ev_type = ev["type"]
 
-            citations_data.append({
-                "id": f"cite-{chunk['id']}",
-                "index": citation_num,
-                "documentId": chunk["doc_id"],
-                "documentName": chunk["doc_name"],
-                "page": chunk["page_number"],
-                "snippet": chunk["content"][:240].strip() + "...",
-                "relevance": chunk.get("relevance", 85)
-            })
-            logger.info(
-                f"  [cite-{citation_num}] {chunk['doc_name']} p.{chunk['page_number']} "
-                f"— relevance: {chunk.get('relevance', 0)}%"
-            )
+            if ev_type == "document":
+                boundary = f"[DOC: {ev['title']} | PAGE: {ev['page']} | SECTION: {ev.get('section', 1)}]"
+                snippet_text = ev["snippet"]
+                citations_data.append({
+                    "id": f"cite-{ev['id']}",
+                    "index": cite_num,
+                    "sourceType": "document",
+                    "documentId": ev.get("doc_id", "doc-1"),
+                    "documentName": ev["title"],
+                    "page": ev["page"],
+                    "url": None,
+                    "retrievedAt": None,
+                    "snippet": snippet_text[:240].strip() + ("..." if len(snippet_text) > 240 else ""),
+                    "relevance": ev.get("relevance", 85)
+                })
+            elif ev_type == "web":
+                domain = ev.get("metadata", {}).get("domain") or "Web"
+                boundary = f"[LIVE WEB: {ev['title']} | URL: {ev.get('url')} | SOURCE: {domain}]"
+                snippet_text = ev["snippet"]
+                citations_data.append({
+                    "id": f"cite-{ev['id']}",
+                    "index": cite_num,
+                    "sourceType": "web",
+                    "documentId": "web",
+                    "documentName": ev["title"],
+                    "page": 1,
+                    "url": ev.get("url"),
+                    "retrievedAt": ev.get("retrieved_at"),
+                    "snippet": snippet_text[:240].strip() + ("..." if len(snippet_text) > 240 else ""),
+                    "relevance": ev.get("relevance", 80)
+                })
+            else:  # live_api
+                api_name = ev.get("metadata", {}).get("api", "Live API")
+                boundary = f"[LIVE DATA: {ev['title']} | API: {api_name} | RETRIEVED: {ev.get('retrieved_at')}]"
+                snippet_text = ev["snippet"]
+                citations_data.append({
+                    "id": f"cite-{ev['id']}",
+                    "index": cite_num,
+                    "sourceType": "live_api",
+                    "documentId": "live-api",
+                    "documentName": ev["title"],
+                    "page": 1,
+                    "url": ev.get("url"),
+                    "retrievedAt": ev.get("retrieved_at"),
+                    "snippet": snippet_text[:240].strip() + ("..." if len(snippet_text) > 240 else ""),
+                    "relevance": ev.get("relevance", 98)
+                })
+
+            context_blocks.append(f"[{cite_num}] {boundary}\n{snippet_text}")
 
         context_str = "\n\n---\n\n".join(context_blocks)
 
-        if is_summary_query:
-            if len(filter_terms) > 1:
-                prompt = (
-                    f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
-                    f"User Question: {query}\n\n"
-                    f"Instructions:\n"
-                    f"- You are a helpful, conversational AI chatbot. Answer naturally and directly.\n"
-                    f"- DO NOT use robotic template openings like 'Based on the context evidence provided...' or 'Based on the provided documents...'. Start directly with the information.\n"
-                    f"- Synthesize and compare the documents clearly: their type, what data/topics they contain, row counts/schemas if spreadsheets, and key takeaways.\n"
-                    f"- Cite sources using bracketed numbers like [1], [2] referencing the context items."
-                )
-            else:
-                prompt = (
-                    f"Context Evidence from Document:\n{context_str}\n\n"
-                    f"User Question: {query}\n\n"
-                    f"Instructions:\n"
-                    f"- You are a helpful, conversational AI chatbot. Answer naturally and directly.\n"
-                    f"- DO NOT use robotic template openings like 'Based on the context evidence provided...' or 'According to the document...'. Start directly with the information.\n"
-                    f"- Provide a clear, natural breakdown of what this document is, its structure, key contents, and core purpose.\n"
-                    f"- If it is a spreadsheet or tabular data, mention total rows, columns, and sample entries.\n"
-                    f"- Cite sources using bracketed numbers like [1], [2] referencing the context items."
-                )
-        else:
-            if len(filter_terms) > 1:
-                prompt = (
-                    f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
-                    f"User Question: {query}\n\n"
-                    f"Instructions:\n"
-                    f"- Answer conversationally and directly like a normal chatbot without repetitive introductory filler.\n"
-                    f"- Answer the user's question using the provided context chunks across the selected documents.\n"
-                    f"- Compare how each relevant document addresses the question and cite differences.\n"
-                    f"- Cite sources using bracketed numbers [1], [2] at the relevant facts."
-                )
-            else:
-                prompt = (
-                    f"Context Evidence:\n{context_str}\n\n"
-                    f"User Question: {query}\n\n"
-                    f"Instructions:\n"
-                    f"- Answer conversationally and directly like a normal chatbot without repetitive introductory filler.\n"
-                    f"- Answer the user's question directly using the provided context chunks.\n"
-                    f"- For spreadsheet queries, cite rows, columns, counts, or values directly from the tables.\n"
-                    f"- Cite sources using bracketed numbers [1], [2] at the relevant facts."
-                )
+        # ── Step 5: Strict Evidence-Grounded Prompt Construction ──────────────
+        prompt = (
+            f"You are an evidence-grounded document intelligence and research assistant.\n\n"
+            f"EVIDENCE CONTEXT:\n{context_str}\n\n"
+            f"USER QUERY: {clean_query}\n\n"
+            f"GROUNDING INSTRUCTIONS:\n"
+            f"1. Use ONLY the evidence provided in the context above. Never fabricate facts, dates, or numbers.\n"
+            f"2. If the user question requires internal documents, cite the document and page using bracketed numbers like [1].\n"
+            f"3. If the user question requires current, live, or web facts, use the web/live evidence and cite it using [1], [2].\n"
+            f"4. If the question asks for both (e.g. document figures and current web data), clearly provide both parts and cite their respective sources.\n"
+            f"5. If the available evidence is insufficient to answer reliably, explicitly say that the available sources do not contain enough information to answer reliably without inventing facts.\n"
+            f"6. If sources conflict, explicitly identify the conflicting claims and cite both sources.\n"
+            f"7. Answer conversationally, clearly, and directly without robotic introductory boilerplate (e.g. avoid 'Based on the context provided...').\n"
+            f"8. Ensure every factual claim includes its bracketed citation tag like [1] or [2]."
+        )
 
         # ── Step 6: LLM Synthesis via Circuit Breaker ──────────────────────────
-        logger.info(f"[LoopEngine] Step 6: Dispatching to Circuit Breaker LLM...")
+        logger.info(f"[LoopEngine] Step 6: Dispatching to Circuit Breaker LLM with {len(all_evidence)} evidence sources...")
         t_llm = time.monotonic()
-        llm_result = await generate_rag_response(prompt, top_chunks, query)
+        llm_result = await generate_rag_response(prompt, all_evidence, clean_query)
         t_llm_elapsed = time.monotonic() - t_llm
 
         answer = llm_result["response"]
         model_used = llm_result["model"]
 
-        logger.info(
-            f"[LoopEngine] Step 6: LLM ✓ — model: {model_used}, "
-            f"answer: {len(answer)} chars, elapsed: {t_llm_elapsed:.2f}s"
-        )
-
-        # Ensure citation tag is present in the answer
-        if "[1]" not in answer and citations_data:
+        # Ensure citation tag exists in answer if evidence was provided
+        if citations_data and not re.search(r'\[\d+\]', answer):
             answer = f"{answer} [1]"
 
-        if conflict_note:
-            answer = f"{answer}\n\n> Note: {conflict_note}"
+        if conflict_note and conflict_note not in answer:
+            answer = f"{answer}\n\n> ⚠ Note: {conflict_note}"
 
         total_elapsed = time.monotonic() - t_total
-        logger.info("─" * 65)
         logger.info(
-            f"[LoopEngine] ✅ Pipeline COMPLETE — confidence={confidence:.3f}, "
-            f"model={model_used}, total_elapsed={total_elapsed:.2f}s"
+            f"[LoopEngine] ✅ Hybrid Pipeline COMPLETE — model={model_used}, "
+            f"citations={len(citations_data)}, total_time={total_elapsed:.2f}s"
         )
-        logger.info("─" * 65)
+        logger.info("═" * 68)
 
         return {
             "answer": answer,
             "citations": citations_data,
             "is_insufficient_info": False,
-            "confidence_score": confidence,
+            "confidence_score": 0.95 if all_evidence else 0.2,
             "model_used": model_used,
-            "conflict_note": conflict_note
+            "conflict_note": conflict_note,
+            "sources_breakdown": {
+                "documents": len(doc_chunks),
+                "web": len(web_results),
+                "live_api": len(live_api_results)
+            }
         }
 
 

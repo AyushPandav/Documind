@@ -78,7 +78,8 @@ async def event_generator_for_query(
         citations = rag_res["citations"]
         model = rag_res["model_used"]
 
-        if not rag_res.get("is_insufficient_info", False):
+        has_live = any(c.get("sourceType") in ["live_api", "web"] for c in citations)
+        if not rag_res.get("is_insufficient_info", False) and not has_live:
             await set_cached_query(
                 query_hash=q_hash,
                 query_text=query_text,
@@ -187,7 +188,8 @@ async def query_rag(request: QueryRequest):
         is_insufficient=is_insufficient
     )
 
-    if not is_insufficient:
+    has_live_sources = any(c.get("sourceType") in ["live_api", "web"] for c in citations)
+    if not is_insufficient and not has_live_sources:
         await set_cached_query(
             query_hash=q_hash,
             query_text=user_query,

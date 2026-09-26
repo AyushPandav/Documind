@@ -11,14 +11,19 @@ export interface DocumentItem {
   uploadedAt: string;
 }
 
+export type CitationSourceType = 'document' | 'web' | 'live_api' | 'search';
+
 export interface CitationSource {
   id: string;
   index: number;
+  sourceType?: CitationSourceType;
   documentId: string;
   documentName: string;
   page: number;
   snippet: string;
   relevance: number; // e.g. 87 for 87%
+  url?: string | null;
+  retrievedAt?: string | null;
 }
 
 export interface ChatMessage {

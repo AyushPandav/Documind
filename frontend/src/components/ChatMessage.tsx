@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { ChatMessage as ChatMessageType, CitationSource } from '@/types';
 import { Colors, Fonts } from '@/constants/theme';
 import { CitationChip } from './CitationChip';
@@ -29,6 +29,7 @@ function renderMarkdownContent(
     citations?.find((c) => c.index === n) || {
       id: `cite-${n}`,
       index: n,
+      sourceType: 'document',
       documentId: 'doc-default',
       documentName: 'document.pdf',
       page: n * 4,
@@ -61,6 +62,7 @@ function renderMarkdownContent(
           <CitationChip
             key={key++}
             index={n}
+            sourceType={c.sourceType}
             active={activeCitationId === c.id}
             onPress={() => onCitationPress?.(c, citations)}
           />
@@ -98,6 +100,7 @@ function renderMarkdownContent(
         </Text>
       );
     }
+
     return parts;
   };
 
@@ -175,6 +178,19 @@ function renderMarkdownContent(
       continue;
     }
 
+    // Blockquote or conflict note (> ...)
+    if (trimmed.startsWith('>')) {
+      nodes.push(
+        <View key={key++} style={styles.quoteBlock}>
+          <Text style={styles.quoteText}>
+            {renderInline(trimmed.replace(/^>\s*/, ''), styles.quoteText)}
+          </Text>
+        </View>
+      );
+      i++;
+      continue;
+    }
+
     // Normal paragraph line
     nodes.push(
       <Text key={key++} style={styles.assistantText}>
@@ -246,18 +262,63 @@ export function ChatMessageItem({
           )}
         </View>
 
-        {/* Citation pills footer */}
+        {/* Multi-Source Evidence Badges Footer */}
         {message.citations && message.citations.length > 0 && (
           <View style={styles.citationsFooter}>
-            <Text style={styles.sourcesLabel}>Sources:</Text>
-            {message.citations.map((c) => (
-              <CitationChip
-                key={c.id}
-                index={c.index}
-                active={activeCitationId === c.id}
-                onPress={() => onCitationPress?.(c, message.citations)}
-              />
-            ))}
+            <Text style={styles.sourcesLabel}>Evidence Sources:</Text>
+            <View style={styles.badgesWrapper}>
+              {message.citations.map((c) => {
+                const isWeb = c.sourceType === 'web' || c.sourceType === 'search';
+                const isLive = c.sourceType === 'live_api';
+
+                const iconName = isLive
+                  ? 'time-outline'
+                  : isWeb
+                  ? 'globe-outline'
+                  : 'document-text-outline';
+
+                const badgeColor = isLive
+                  ? '#10B981'
+                  : isWeb
+                  ? '#38BDF8'
+                  : Colors.primaryCyan;
+
+                const badgeBg = isLive
+                  ? 'rgba(16, 185, 129, 0.08)'
+                  : isWeb
+                  ? 'rgba(56, 189, 248, 0.08)'
+                  : 'rgba(34, 211, 238, 0.08)';
+
+                const badgeBorder = isLive
+                  ? 'rgba(16, 185, 129, 0.3)'
+                  : isWeb
+                  ? 'rgba(56, 189, 248, 0.3)'
+                  : 'rgba(34, 211, 238, 0.3)';
+
+                const titleLabel =
+                  decodeURIComponent(c.documentName || 'Source')
+                    .replace(/\.[^/.]+$/, '')
+                    .slice(0, 18) + (c.page > 1 ? ` (p.${c.page})` : '');
+
+                return (
+                  <Pressable
+                    key={c.id}
+                    onPress={() => onCitationPress?.(c, message.citations)}
+                    style={({ pressed }) => [
+                      styles.sourceBadge,
+                      { backgroundColor: badgeBg, borderColor: badgeBorder },
+                      activeCitationId === c.id && { borderColor: badgeColor, backgroundColor: 'rgba(255,255,255,0.1)' },
+                      pressed && { opacity: 0.7 },
+                    ]}
+                  >
+                    <Ionicons name={iconName as any} size={11} color={badgeColor} />
+                    <Text style={[styles.sourceBadgeText, { color: badgeColor }]}>
+                      [{c.index}] {titleLabel}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
           </View>
         )}
 
@@ -445,16 +506,27 @@ const styles = StyleSheet.create({
     color: '#a5f3fc',
     lineHeight: 18,
   },
+  quoteBlock: {
+    backgroundColor: 'rgba(234, 179, 8, 0.08)',
+    borderLeftWidth: 3,
+    borderLeftColor: '#EAB308',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 4,
+    marginVertical: 4,
+  },
+  quoteText: {
+    fontFamily: Fonts.sans,
+    fontSize: 13,
+    color: '#FDE047',
+    lineHeight: 19,
+  },
   lineGap: {
     height: 6,
   },
 
-  // ── Citations ────────────────────────────────────────────────────────────────
+  // ── Multi-Source Citations Footer ────────────────────────────────────────────
   citationsFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 4,
     marginTop: 10,
     paddingTop: 8,
     borderTopWidth: 1,
@@ -462,9 +534,31 @@ const styles = StyleSheet.create({
   },
   sourcesLabel: {
     fontFamily: Fonts.mono,
-    fontSize: 11,
+    fontSize: 10,
+    fontWeight: '700',
     color: Colors.textMuted,
-    marginRight: 4,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  badgesWrapper: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  sourceBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  sourceBadgeText: {
+    fontFamily: Fonts.mono,
+    fontSize: 11,
+    fontWeight: '600',
   },
   timestampAssistant: {
     fontFamily: Fonts.mono,
