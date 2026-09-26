@@ -3,6 +3,7 @@ import { View, Text, StyleSheet } from 'react-native';
 import { ChatMessage as ChatMessageType, CitationSource } from '@/types';
 import { Colors, Fonts } from '@/constants/theme';
 import { CitationChip } from './CitationChip';
+import { VoiceoverButton } from './VoiceoverButton';
 import { Ionicons } from '@expo/vector-icons';
 
 interface ChatMessageProps {
@@ -115,8 +116,11 @@ export function ChatMessageItem({
     <View style={styles.assistantRow}>
       <View style={styles.assistantBubble}>
         <View style={styles.assistantHeader}>
-          <View style={styles.assistantAccentDot} />
-          <Text style={styles.assistantSender}>DocuMind AI</Text>
+          <View style={styles.senderContainer}>
+            <View style={styles.assistantAccentDot} />
+            <Text style={styles.assistantSender}>DocuMind AI</Text>
+          </View>
+          <VoiceoverButton text={message.content} />
         </View>
 
         {renderAssistantContent()}
@@ -195,8 +199,13 @@ const styles = StyleSheet.create({
   assistantHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'space-between',
     marginBottom: 6,
+  },
+  senderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   assistantAccentDot: {
     width: 6,

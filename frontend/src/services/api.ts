@@ -91,61 +91,71 @@ export async function uploadDocumentToBackend(
     const uploadUrl = `${API_BASE_URL}/api/documents/upload`;
     const base64UploadUrl = `${API_BASE_URL}/api/documents/upload-base64`;
 
-    // ── 1. Native Mobile: Attempt FileSystem.uploadAsync (Native Multipart) ──
-    if (Platform.OS !== 'web' && FileSystem && typeof FileSystem.uploadAsync === 'function') {
-      try {
-        console.log(`[DocuMind API] Uploading ${fileName} via FileSystem.uploadAsync to ${uploadUrl}`);
-        
-        // uploadType 1 is MULTIPART (defined in FileSystemUploadType.MULTIPART)
-        const uploadResult = await FileSystem.uploadAsync(uploadUrl, fileUri, {
-          httpMethod: 'POST',
-          uploadType: 1 as any,
-          fieldName: 'file',
-          mimeType: fileType,
-          parameters: {},
-        });
-
-        if (uploadResult.status >= 200 && uploadResult.status < 300) {
-          const data = JSON.parse(uploadResult.body);
-          console.log(`[DocuMind API] uploadAsync SUCCESS for ${fileName}:`, data.id);
-          return {
-            id: data.id,
-            name: decodeURIComponent(data.name || fileName),
-            size: data.size,
-            pages: data.pages || 1,
-            status: data.status,
-            progress: data.progress,
-            uploadedAt: 'Just now',
-          };
-        } else {
-          console.warn(`[DocuMind API] uploadAsync returned status ${uploadResult.status}, trying Base64 fallback...`);
+    // ── Native Mobile path ──────────────────────────────────────────────────
+    if (Platform.OS !== 'web' && FileSystem) {
+      // Android DocumentPicker files land in an unreadable sandbox cache path
+      // (/DocumentPicker/...). MUST copy to app's documentDirectory first.
+      let readableUri = fileUri;
+      if (FileSystem.documentDirectory) {
+        const safeFilename = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const destUri = `${FileSystem.documentDirectory}${Date.now()}_${safeFilename}`;
+        try {
+          await FileSystem.copyAsync({ from: fileUri, to: destUri });
+          readableUri = destUri;
+          console.log(`[DocuMind API] Copied to writable path: ${destUri}`);
+        } catch (copyErr) {
+          console.warn(`[DocuMind API] File copy failed (${copyErr}), using original URI...`);
         }
-      } catch (uploadAsyncErr) {
-        console.warn(`[DocuMind API] uploadAsync error (${uploadAsyncErr}), switching to Base64 JSON fallback...`);
       }
 
-      // ── 2. Native Mobile Fail-safe: Base64 JSON Upload (100% reliable) ──
+      // ── 1. Native Multipart via FileSystem.uploadAsync ─────────────────────
+      if (typeof FileSystem.uploadAsync === 'function') {
+        try {
+          console.log(`[DocuMind API] Uploading ${fileName} via uploadAsync to ${uploadUrl}`);
+          const uploadResult = await FileSystem.uploadAsync(uploadUrl, readableUri, {
+            httpMethod: 'POST',
+            uploadType: 1 as any, // MULTIPART
+            fieldName: 'file',
+            mimeType: fileType,
+            parameters: {},
+          });
+
+          if (uploadResult.status >= 200 && uploadResult.status < 300) {
+            const data = JSON.parse(uploadResult.body);
+            if (readableUri !== fileUri) FileSystem.deleteAsync(readableUri, { idempotent: true }).catch(() => {});
+            return {
+              id: data.id,
+              name: decodeURIComponent(data.name || fileName),
+              size: data.size,
+              pages: data.pages || 1,
+              status: data.status,
+              progress: data.progress,
+              uploadedAt: 'Just now',
+            };
+          } else {
+            console.warn(`[DocuMind API] uploadAsync status ${uploadResult.status}, falling back to Base64...`);
+          }
+        } catch (uploadAsyncErr) {
+          console.warn(`[DocuMind API] uploadAsync error (${uploadAsyncErr}), trying Base64...`);
+        }
+      }
+
+      // ── 2. Base64 JSON fallback ─────────────────────────────────────────────
       try {
         console.log(`[DocuMind API] Uploading ${fileName} via Base64 JSON to ${base64UploadUrl}`);
-        const base64Data = await FileSystem.readAsStringAsync(fileUri, {
+        const base64Data = await FileSystem.readAsStringAsync(readableUri, {
           encoding: 'base64' as any,
         });
+        if (readableUri !== fileUri) FileSystem.deleteAsync(readableUri, { idempotent: true }).catch(() => {});
 
         const b64Res = await fetch(base64UploadUrl, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            filename: fileName,
-            file_base64: base64Data,
-            mime_type: fileType,
-          }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: fileName, file_base64: base64Data, mime_type: fileType }),
         });
 
         if (b64Res.ok) {
           const data = await b64Res.json();
-          console.log(`[DocuMind API] Base64 upload SUCCESS for ${fileName}:`, data.id);
           return {
             id: data.id,
             name: decodeURIComponent(data.name || fileName),
@@ -156,11 +166,11 @@ export async function uploadDocumentToBackend(
             uploadedAt: 'Just now',
           };
         } else {
-          const errText = await b64Res.text();
-          console.warn(`[DocuMind API] Base64 upload HTTP ${b64Res.status}:`, errText);
+          console.warn(`[DocuMind API] Base64 upload HTTP ${b64Res.status}:`, await b64Res.text());
         }
       } catch (b64Err) {
         console.warn(`[DocuMind API] Base64 upload error:`, b64Err);
+        if (readableUri !== fileUri) FileSystem.deleteAsync(readableUri, { idempotent: true }).catch(() => {});
       }
     }
 
@@ -415,4 +425,43 @@ export async function reindexDocument(docId: string): Promise<boolean> {
     return false;
   }
 }
+
+export interface VoiceoverResponse {
+  status: string;
+  model: string;
+  short_summary: string;
+  duration_seconds: number;
+  audio_base64: string;
+  mime_type: string;
+}
+
+/**
+ * Generates a short voice-over summary of the provided text using Kokoro-82M.
+ */
+export async function generateVoiceover(
+  text: string,
+  voice: string = 'af_heart',
+  speed: number = 1.05
+): Promise<VoiceoverResponse | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/tts/voiceover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice, speed }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.log('[DocuMind API] Voiceover synthesis error:', err);
+    return null;
+  }
+}
+
+/**
+ * Returns direct streaming URL for Kokoro-82M voiceover audio.
+ */
+export function getVoiceoverAudioUrl(text: string, voice: string = 'af_heart'): string {
+  return `${API_BASE_URL}/api/tts/speak?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`;
+}
+
 
