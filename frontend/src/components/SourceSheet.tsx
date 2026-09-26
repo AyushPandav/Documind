@@ -114,29 +114,37 @@ export function SourceSheet({
 
           {/* Multiple Citation Selector if available */}
           {sourcesList.length > 1 && (
-            <View style={styles.tabsRow}>
-              {sourcesList.map((src) => {
-                const isSelected = src.id === currentSource?.id;
-                return (
-                  <Pressable
-                    key={src.id}
-                    onPress={() => onSelectSource?.(src)}
-                    style={[
-                      styles.tabPill,
-                      isSelected && styles.tabPillActive,
-                    ]}
-                  >
-                    <Text
+            <View style={styles.tabsWrapper}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.tabsScrollContent}
+                nestedScrollEnabled={true}
+              >
+                {sourcesList.map((src) => {
+                  const isSelected = src.id === currentSource?.id;
+                  return (
+                    <Pressable
+                      key={src.id}
+                      onPress={() => onSelectSource?.(src)}
                       style={[
-                        styles.tabPillText,
-                        isSelected && styles.tabPillTextActive,
+                        styles.tabPill,
+                        isSelected && styles.tabPillActive,
                       ]}
+                      hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
                     >
-                      [{src.index}] Page {src.page}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+                      <Text
+                        style={[
+                          styles.tabPillText,
+                          isSelected && styles.tabPillTextActive,
+                        ]}
+                      >
+                        [{src.index}] Page {src.page}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             </View>
           )}
 
@@ -144,7 +152,8 @@ export function SourceSheet({
           <ScrollView
             style={styles.contentScroll}
             contentContainerStyle={styles.contentBody}
-            showsVerticalScrollIndicator={false}
+            showsVerticalScrollIndicator={true}
+            nestedScrollEnabled={true}
           >
             {currentSource ? (
               <View style={styles.sourceCard}>
@@ -152,7 +161,7 @@ export function SourceSheet({
                 <View style={styles.docHeader}>
                   <View style={styles.docMetaLeft}>
                     <Text style={styles.docName} numberOfLines={1}>
-                      {currentSource.documentName}
+                      {decodeURIComponent(currentSource.documentName)}
                     </Text>
                     <View style={styles.badgeRow}>
                       <View style={styles.pageBadge}>
@@ -280,13 +289,17 @@ const styles = StyleSheet.create({
   closeButton: {
     padding: 4,
   },
-  tabsRow: {
+  tabsWrapper: {
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.borderSubtle,
+    backgroundColor: 'rgba(15, 23, 42, 0.5)',
+  },
+  tabsScrollContent: {
     flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 10,
     gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.borderSubtle,
   },
   tabPill: {
     paddingHorizontal: 10,

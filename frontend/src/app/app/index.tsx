@@ -119,19 +119,6 @@ export default function MainAppScreen() {
         </View>
 
         <View style={styles.headerRight}>
-          {/* Quick New Chat Button */}
-          <IconButton
-            onPress={() => createNewChat('New Conversation')}
-            icon={
-              <Ionicons
-                name="add"
-                size={20}
-                color={Colors.primaryCyan}
-              />
-            }
-            accessibilityLabel="Create new chat"
-          />
-
           {/* Local Chat History Drawer Button */}
           <IconButton
             onPress={() => setIsChatHistorySheetOpen(true)}
@@ -140,7 +127,7 @@ export default function MainAppScreen() {
             icon={
               <Ionicons
                 name="chatbubbles-outline"
-                size={18}
+                size={17}
                 color={
                   isChatHistorySheetOpen
                     ? Colors.primaryCyan
@@ -161,7 +148,7 @@ export default function MainAppScreen() {
             icon={
               <Ionicons
                 name="git-network-outline"
-                size={18}
+                size={17}
                 color={
                   isRelatednessSheetOpen
                     ? Colors.primaryCyan
@@ -182,7 +169,7 @@ export default function MainAppScreen() {
             icon={
               <Ionicons
                 name={selectedDocuments.length > 1 ? "layers-outline" : "folder-outline"}
-                size={18}
+                size={17}
                 color={
                   isDocumentsSheetOpen || selectedDocuments.length > 0
                     ? Colors.primaryCyan
@@ -227,7 +214,7 @@ export default function MainAppScreen() {
             icon={
               <Ionicons
                 name="bookmark-outline"
-                size={18}
+                size={17}
                 color={isSourceSheetOpen ? Colors.primaryCyan : Colors.textPrimary}
               />
             }
@@ -240,7 +227,7 @@ export default function MainAppScreen() {
             icon={
               <Ionicons
                 name="log-out-outline"
-                size={18}
+                size={17}
                 color={Colors.textMuted}
               />
             }
@@ -508,14 +495,14 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   header: {
-    height: 60,
+    height: 56,
     backgroundColor: Colors.surface,
     borderBottomWidth: 1,
     borderBottomColor: Colors.borderCyan,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     shadowColor: Colors.primaryCyan,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -525,11 +512,13 @@ const styles = StyleSheet.create({
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   subHeaderBar: {
     flexDirection: 'row',

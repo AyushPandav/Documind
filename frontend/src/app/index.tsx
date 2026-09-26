@@ -1,32 +1,29 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { View, StyleSheet, ActivityIndicator } from 'react-native';
-import { useRouter } from 'expo-router';
+import { Redirect, useRootNavigationState } from 'expo-router';
 import { useApp } from '@/context/AppContext';
 import { Colors } from '@/constants/theme';
 import { DocuMindLogo } from '@/components/DocuMindLogo';
 
 export default function IndexScreen() {
-  const router = useRouter();
+  const rootNavigationState = useRootNavigationState();
   const { user } = useApp();
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (user) {
-        router.replace('/app');
-      } else {
-        router.replace('/auth/login');
-      }
-    }, 150);
+  // Wait until Expo Root Navigator is fully mounted before redirecting
+  if (!rootNavigationState?.key) {
+    return (
+      <View style={styles.container}>
+        <DocuMindLogo size="large" />
+        <ActivityIndicator size="small" color={Colors.primaryCyan} style={styles.loader} />
+      </View>
+    );
+  }
 
-    return () => clearTimeout(timer);
-  }, [user, router]);
+  if (user) {
+    return <Redirect href="/app" />;
+  }
 
-  return (
-    <View style={styles.container}>
-      <DocuMindLogo size="large" />
-      <ActivityIndicator size="small" color={Colors.primaryCyan} style={styles.loader} />
-    </View>
-  );
+  return <Redirect href="/auth/login" />;
 }
 
 const styles = StyleSheet.create({
