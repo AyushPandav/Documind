@@ -179,17 +179,23 @@ class SelfReflectiveRAGLoop:
         ]
         is_summary_query = any(st in query.lower() for st in summary_triggers)
 
+        # Parse document filter terms
+        filter_terms = [t.strip().lower() for t in doc_filter.split(",") if t.strip()] if doc_filter else []
+
         # ── Fast-path for Document Overview / Description Queries ────────────
         if is_summary_query:
             logger.info(f"[LoopEngine] 📑 Overview/Description query detected — gathering introductory context")
             target_chunks = all_chunks
-            if doc_filter:
+            if filter_terms:
                 filtered = [
                     c for c in all_chunks
-                    if c.get("doc_name") == doc_filter
-                    or c.get("doc_id") == doc_filter
-                    or doc_filter.lower() in c.get("doc_name", "").lower()
-                    or c.get("doc_name", "").lower() in doc_filter.lower()
+                    if any(
+                        term == c.get("doc_name", "").lower()
+                        or term == c.get("doc_id", "").lower()
+                        or term in c.get("doc_name", "").lower()
+                        or c.get("doc_name", "").lower() in term
+                        for term in filter_terms
+                    )
                 ]
                 if filtered:
                     target_chunks = filtered
@@ -199,7 +205,7 @@ class SelfReflectiveRAGLoop:
                         from app.db.sqlite_cache import get_all_documents
                         db_docs = await get_all_documents()
                         matching_db = next(
-                            (d for d in db_docs if d["name"].lower() == doc_filter.lower() or doc_filter.lower() in d["name"].lower()),
+                            (d for d in db_docs if any(term in d["name"].lower() for term in filter_terms)),
                             None
                         )
                         if matching_db and matching_db.get("status") in ["QUEUED", "OCR", "CHUNKING", "EMBEDDING", "PROCESSING"]:
@@ -218,9 +224,27 @@ class SelfReflectiveRAGLoop:
                     logger.info(f"[LoopEngine] Using available {len(all_chunks)} chunks for description")
                     target_chunks = all_chunks
 
-            # Sort by page number and chunk index so we get the beginning of the document
-            target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
-            top_chunks = target_chunks[:5]
+            if len(filter_terms) > 1:
+                # Multi-document overview: gather top 2-3 chunks per filtered document
+                top_chunks_list = []
+                for term in filter_terms:
+                    doc_chunks = [
+                        c for c in target_chunks
+                        if term == c.get("doc_name", "").lower()
+                        or term in c.get("doc_name", "").lower()
+                        or c.get("doc_name", "").lower() in term
+                    ]
+                    doc_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
+                    top_chunks_list.extend(doc_chunks[:3])
+                if not top_chunks_list:
+                    target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
+                    top_chunks_list = target_chunks[:6]
+                top_chunks = top_chunks_list
+            else:
+                # Sort by page number and chunk index so we get the beginning of the document
+                target_chunks.sort(key=lambda c: (c.get("page_number", 1), c.get("chunk_index", 1)))
+                top_chunks = target_chunks[:5]
+
             confidence = 0.95
             conflict_note = None
 
@@ -230,6 +254,7 @@ class SelfReflectiveRAGLoop:
             logger.info(f"[LoopEngine] Step 1: {len(sub_queries)} sub-quer{'y' if len(sub_queries) == 1 else 'ies'} identified")
 
             collected_chunks: Dict[str, Dict[str, Any]] = {}
+            retrieval_k = max(4, min(15, len(filter_terms) * 3)) if len(filter_terms) > 1 else 4
 
             # ── Step 2: Hybrid Retrieval + Reflection Loop ────────────────────────
             for sq_idx, sq in enumerate(sub_queries):
@@ -241,7 +266,7 @@ class SelfReflectiveRAGLoop:
                     retrieved = hybrid_retriever.retrieve(
                         query=active_q,
                         chunks=all_chunks,
-                        top_k=4,
+                        top_k=retrieval_k,
                         doc_filter=doc_filter
                     )
 
@@ -265,7 +290,27 @@ class SelfReflectiveRAGLoop:
             # ── Step 3: Consolidate & Final Sufficiency Check ─────────────────────
             final_chunks = list(collected_chunks.values())
             final_chunks.sort(key=lambda x: x.get("relevance", 0), reverse=True)
-            top_chunks = final_chunks[:4]
+
+            if len(filter_terms) > 1:
+                # Ensure representation across each filtered document
+                top_chunks_selected = []
+                for term in filter_terms:
+                    doc_chunks = [
+                        c for c in final_chunks
+                        if term in c.get("doc_name", "").lower() or term in c.get("doc_id", "").lower()
+                    ]
+                    if doc_chunks:
+                        top_chunks_selected.extend(doc_chunks[:2])
+                
+                # Add highest remaining chunks up to max 8
+                selected_ids = {c["id"] for c in top_chunks_selected}
+                for c in final_chunks:
+                    if c["id"] not in selected_ids and len(top_chunks_selected) < 8:
+                        top_chunks_selected.append(c)
+
+                top_chunks = top_chunks_selected if top_chunks_selected else final_chunks[:4]
+            else:
+                top_chunks = final_chunks[:4]
 
             if not top_chunks:
                 # Fall back to introductory chunks
@@ -315,24 +360,46 @@ class SelfReflectiveRAGLoop:
         context_str = "\n\n---\n\n".join(context_blocks)
 
         if is_summary_query:
-            prompt = (
-                f"Context Evidence from Document:\n{context_str}\n\n"
-                f"User Question: {query}\n\n"
-                f"Instructions:\n"
-                f"- The user is asking for an overview, summary, or description of the document.\n"
-                f"- Provide a clear, structured, and informative description explaining what this document is about.\n"
-                f"- Summarize the primary topics covered, core purpose, key rules/guidelines, and important takeaways based on the context evidence.\n"
-                f"- Cite your sources using bracketed notation like [1], [2] referencing the context items."
-            )
+            if len(filter_terms) > 1:
+                prompt = (
+                    f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
+                    f"User Question: {query}\n\n"
+                    f"Instructions:\n"
+                    f"- The user is querying across multiple selected documents.\n"
+                    f"- Provide a clear, structured response synthesizing and comparing the information across ALL provided documents.\n"
+                    f"- Highlight key provisions, similarities, differences, and important takeaways from each document.\n"
+                    f"- Cite your sources using bracketed notation like [1], [2] referencing the context items."
+                )
+            else:
+                prompt = (
+                    f"Context Evidence from Document:\n{context_str}\n\n"
+                    f"User Question: {query}\n\n"
+                    f"Instructions:\n"
+                    f"- The user is asking for an overview, summary, or description of the document.\n"
+                    f"- Provide a clear, structured, and informative description explaining what this document is about.\n"
+                    f"- Summarize the primary topics covered, core purpose, key rules/guidelines, and important takeaways based on the context evidence.\n"
+                    f"- Cite your sources using bracketed notation like [1], [2] referencing the context items."
+                )
         else:
-            prompt = (
-                f"Context Evidence:\n{context_str}\n\n"
-                f"User Question: {query}\n\n"
-                f"Instructions:\n"
-                f"- Answer the question strictly using the provided context chunks.\n"
-                f"- Cite your sources using bracketed notation [1], [2] referencing the numbered context.\n"
-                f"- If the evidence does not provide enough facts, state clearly what the document covers instead."
-            )
+            if len(filter_terms) > 1:
+                prompt = (
+                    f"Context Evidence from Multiple Selected Documents ({', '.join(filter_terms)}):\n{context_str}\n\n"
+                    f"User Question: {query}\n\n"
+                    f"Instructions:\n"
+                    f"- Answer the question using the provided context chunks across all selected documents.\n"
+                    f"- Compare how each relevant document addresses the question and cite differences.\n"
+                    f"- Cite your sources using bracketed notation [1], [2] referencing the numbered context.\n"
+                    f"- If the evidence does not provide enough facts, state clearly what the documents cover instead."
+                )
+            else:
+                prompt = (
+                    f"Context Evidence:\n{context_str}\n\n"
+                    f"User Question: {query}\n\n"
+                    f"Instructions:\n"
+                    f"- Answer the question strictly using the provided context chunks.\n"
+                    f"- Cite your sources using bracketed notation [1], [2] referencing the numbered context.\n"
+                    f"- If the evidence does not provide enough facts, state clearly what the document covers instead."
+                )
 
         # ── Step 6: LLM Synthesis via Circuit Breaker ──────────────────────────
         logger.info(f"[LoopEngine] Step 6: Dispatching to Circuit Breaker LLM...")

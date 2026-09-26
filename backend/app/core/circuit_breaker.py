@@ -195,8 +195,30 @@ def offline_heuristic_synthesizer(query: str, chunks: List[Dict[str, Any]]) -> s
     if not chunks:
         return "No document text is available yet. Please upload a document to get an analysis and description."
 
-    summary_triggers = ["what is", "about", "describe", "description", "summary", "overview", "explain", "tell me"]
+    summary_triggers = ["what is", "about", "describe", "description", "summary", "overview", "explain", "tell me", "compare"]
     is_desc = any(st in query.lower() for st in summary_triggers)
+
+    unique_docs = list(dict.fromkeys(c.get("doc_name", "document") for c in chunks))
+
+    if len(unique_docs) > 1:
+        # Multi-document synthesis: pull best representative sentences from each selected document
+        doc_bullets = []
+        for dname in unique_docs:
+            d_chunks = [c for c in chunks if c.get("doc_name") == dname]
+            if d_chunks:
+                c = d_chunks[0]
+                citation_num = chunks.index(c) + 1
+                sentences = [s.strip() for s in c["content"].split(".") if len(s.strip()) > 15]
+                chosen = sentences[0] if sentences else c["content"][:140]
+                clean = chosen.rstrip(". ")
+                doc_bullets.append(f"• **{dname}**: {clean} [{citation_num}].")
+
+        result = (
+            f"Based on the {len(unique_docs)} selected documents ({', '.join(unique_docs)}), here is a cross-document summary:\n\n"
+            + "\n".join(doc_bullets)
+        )
+        logger.info(f"[CircuitBreaker] ✓ Multi-doc offline synthesis complete: {len(result)} chars from {len(unique_docs)} doc(s)")
+        return result
 
     query_words = set(query.lower().split())
     answer_sentences = []

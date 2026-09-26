@@ -358,31 +358,47 @@ export function DocumentsSheet({
             </View>
           </ScrollView>
 
-          {/* Sticky Bottom Actions Bar when multiple documents are selected */}
-          {selectedCount >= 2 && (
+          {/* Sticky Bottom Actions Bar when documents are selected */}
+          {selectedCount >= 1 && (
             <View style={styles.bottomActionBar}>
-              <Pressable
-                onPress={handleRelatednessClick}
-                style={({ pressed }) => [
-                  styles.bottomRelatedBtn,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Ionicons name="git-network" size={15} color="#0B101B" />
-                <Text style={styles.bottomRelatedBtnText}>
-                  Check Relatedness ({selectedCount})
-                </Text>
-              </Pressable>
+              {selectedCount >= 2 && onAnalyzeRelatedness && (
+                <Pressable
+                  onPress={handleRelatednessClick}
+                  style={({ pressed }) => [
+                    styles.bottomRelatedBtn,
+                    pressed && styles.pressed,
+                  ]}
+                >
+                  <Ionicons name="git-network" size={15} color="#0B101B" />
+                  <Text style={styles.bottomRelatedBtnText}>
+                    Relatedness ({selectedCount})
+                  </Text>
+                </Pressable>
+              )}
 
               <Pressable
                 onPress={onClose}
                 style={({ pressed }) => [
-                  styles.bottomChatBtn,
+                  selectedCount >= 2 ? styles.bottomChatBtn : styles.bottomChatBtnFull,
                   pressed && styles.pressed,
                 ]}
               >
-                <Ionicons name="chatbubbles-outline" size={15} color={Colors.primaryCyan} />
-                <Text style={styles.bottomChatBtnText}>Chat with Selected</Text>
+                <Ionicons
+                  name="chatbubbles-outline"
+                  size={15}
+                  color={selectedCount >= 2 ? Colors.primaryCyan : '#0B101B'}
+                />
+                <Text
+                  style={
+                    selectedCount >= 2
+                      ? styles.bottomChatBtnText
+                      : styles.bottomChatBtnTextFull
+                  }
+                >
+                  {selectedCount >= 2
+                    ? `Chat with ${selectedCount} Docs`
+                    : `Chat with ${selectedDocuments[0]?.name.slice(0, 24)}...`}
+                </Text>
               </Pressable>
             </View>
           )}
@@ -775,6 +791,22 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 12,
     color: Colors.primaryCyan,
+  },
+  bottomChatBtnFull: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: Colors.primaryCyan,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  bottomChatBtnTextFull: {
+    fontFamily: Fonts.sans,
+    fontWeight: '700',
+    fontSize: 12,
+    color: '#0B101B',
   },
   pressed: {
     opacity: 0.7,

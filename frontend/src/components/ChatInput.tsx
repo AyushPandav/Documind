@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Pressable,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, Fonts } from '@/constants/theme';
@@ -15,14 +16,20 @@ interface ChatInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
   selectedDocument?: DocumentItem | null;
+  selectedDocuments?: DocumentItem[];
   onClearContext?: () => void;
+  onRemoveDocument?: (doc: DocumentItem | string) => void;
+  onOpenDocumentsSheet?: () => void;
 }
 
 export function ChatInput({
   onSend,
   disabled = false,
   selectedDocument,
+  selectedDocuments = [],
   onClearContext,
+  onRemoveDocument,
+  onOpenDocumentsSheet,
 }: ChatInputProps) {
   const [text, setText] = useState('');
 
@@ -33,16 +40,90 @@ export function ChatInput({
   };
 
   const isSendDisabled = !text.trim() || disabled;
+  const multiCount = selectedDocuments.length;
+  const singleDoc = multiCount === 1 ? selectedDocuments[0] : selectedDocument;
+
+  const placeholderText =
+    multiCount > 1
+      ? `Ask across ${multiCount} selected documents...`
+      : singleDoc
+      ? `Ask about ${singleDoc.name}...`
+      : 'Ask about your documents...';
+
+  const helperText =
+    multiCount > 1
+      ? `Cross-referencing ${multiCount} documents • Grounded with citations`
+      : singleDoc
+      ? `Grounded in ${singleDoc.name} • Cites page & sections`
+      : 'Ask a question about your uploaded documents';
 
   return (
     <View style={styles.container}>
-      {/* Context pill if document is selected */}
-      {selectedDocument && (
+      {/* Multi-Document Context Bar */}
+      {multiCount > 1 && (
+        <View style={styles.multiContextBar}>
+          <View style={styles.multiContextTopRow}>
+            <View style={styles.multiContextTitleGroup}>
+              <Ionicons name="layers" size={13} color={Colors.primaryCyan} />
+              <Text style={styles.multiContextTitle}>
+                Active Context: {multiCount} Documents
+              </Text>
+            </View>
+            <View style={styles.multiContextActions}>
+              {onOpenDocumentsSheet && (
+                <Pressable
+                  onPress={onOpenDocumentsSheet}
+                  hitSlop={6}
+                  style={styles.manageDocsBtn}
+                >
+                  <Text style={styles.manageDocsText}>+ Add / Edit</Text>
+                </Pressable>
+              )}
+              {onClearContext && (
+                <Pressable
+                  onPress={onClearContext}
+                  hitSlop={6}
+                  style={styles.clearAllBtn}
+                >
+                  <Text style={styles.clearAllText}>Clear All</Text>
+                </Pressable>
+              )}
+            </View>
+          </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.docChipsScroll}
+          >
+            {selectedDocuments.map((doc) => (
+              <View key={doc.id} style={styles.docChip}>
+                <Ionicons name="document-text-outline" size={11} color={Colors.primaryCyan} />
+                <Text style={styles.docChipName} numberOfLines={1}>
+                  {doc.name}
+                </Text>
+                {onRemoveDocument && (
+                  <Pressable
+                    onPress={() => onRemoveDocument(doc)}
+                    hitSlop={6}
+                    style={styles.docChipClose}
+                  >
+                    <Ionicons name="close" size={11} color={Colors.textMuted} />
+                  </Pressable>
+                )}
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Single Document Context Bar */}
+      {multiCount <= 1 && singleDoc && (
         <View style={styles.contextBar}>
           <View style={styles.contextPill}>
             <Ionicons name="document-text-outline" size={13} color={Colors.primaryCyan} />
             <Text style={styles.contextText} numberOfLines={1}>
-              Context: {selectedDocument.name}
+              Context: {singleDoc.name}
             </Text>
             {onClearContext && (
               <Pressable
@@ -55,6 +136,15 @@ export function ChatInput({
               </Pressable>
             )}
           </View>
+          {onOpenDocumentsSheet && (
+            <Pressable
+              onPress={onOpenDocumentsSheet}
+              hitSlop={6}
+              style={styles.addMoreDocsBtn}
+            >
+              <Text style={styles.addMoreDocsText}>+ Multi-Select</Text>
+            </Pressable>
+          )}
         </View>
       )}
 
@@ -62,7 +152,7 @@ export function ChatInput({
       <View style={styles.inputBox}>
         <TextInput
           style={styles.textInput}
-          placeholder="Ask about your documents..."
+          placeholder={placeholderText}
           placeholderTextColor={Colors.textMuted}
           value={text}
           onChangeText={setText}
@@ -93,9 +183,7 @@ export function ChatInput({
         </Pressable>
       </View>
 
-      <Text style={styles.helperText}>
-        Ask a question about your uploaded documents
-      </Text>
+      <Text style={styles.helperText}>{helperText}</Text>
     </View>
   );
 }
@@ -111,7 +199,10 @@ const styles = StyleSheet.create({
   },
   contextBar: {
     flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 8,
+    gap: 8,
   },
   contextPill: {
     flexDirection: 'row',
@@ -123,7 +214,7 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    maxWidth: '90%',
+    maxWidth: '75%',
   },
   contextText: {
     fontFamily: Fonts.mono,
@@ -133,6 +224,98 @@ const styles = StyleSheet.create({
   },
   clearContextButton: {
     marginLeft: 4,
+  },
+  addMoreDocsBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 6,
+  },
+  addMoreDocsText: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    color: Colors.textMuted,
+  },
+  multiContextBar: {
+    marginBottom: 8,
+    backgroundColor: 'rgba(34, 211, 238, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(34, 211, 238, 0.25)',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingTop: 6,
+    paddingBottom: 6,
+    gap: 6,
+  },
+  multiContextTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  multiContextTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  multiContextTitle: {
+    fontFamily: Fonts.mono,
+    fontSize: 11,
+    fontWeight: '700',
+    color: Colors.primaryCyan,
+  },
+  multiContextActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  manageDocsBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: 'rgba(34, 211, 238, 0.12)',
+    borderRadius: 4,
+  },
+  manageDocsText: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    color: Colors.primaryCyan,
+    fontWeight: '600',
+  },
+  clearAllBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  clearAllText: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    color: Colors.textMuted,
+  },
+  docChipsScroll: {
+    flexDirection: 'row',
+    gap: 6,
+    paddingVertical: 2,
+  },
+  docChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    maxWidth: 160,
+  },
+  docChipName: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    color: Colors.textPrimary,
+    flexShrink: 1,
+  },
+  docChipClose: {
+    marginLeft: 2,
   },
   inputBox: {
     flexDirection: 'row',

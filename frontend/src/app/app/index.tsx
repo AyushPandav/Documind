@@ -91,11 +91,24 @@ export default function MainAppScreen() {
     openSourceSheet(citation, allCitations);
   };
 
-  const samplePrompts = [
-    "What is the company's refund policy?",
-    'How many days of leave are employees entitled to?',
-    'What are the requirements mentioned in the document?',
-  ];
+  const currentPrompts =
+    selectedDocuments.length > 1
+      ? [
+          `Compare ${selectedDocuments[0]?.name.slice(0, 16)} and ${selectedDocuments[1]?.name.slice(0, 16)}`,
+          'What are the key differences or conflicting guidelines between these files?',
+          `Synthesize an executive summary across all ${selectedDocuments.length} documents`,
+        ]
+      : selectedDocument
+      ? [
+          `What is the primary topic of ${selectedDocument.name}?`,
+          'What are the core requirements and policies mentioned?',
+          'Provide a detailed section-by-section breakdown.',
+        ]
+      : [
+          "What is the company's refund policy?",
+          'How many days of leave are employees entitled to?',
+          'What are the requirements mentioned in the document?',
+        ];
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
@@ -164,14 +177,14 @@ export default function MainAppScreen() {
           {/* Documents Drawer Button */}
           <IconButton
             onPress={() => setIsDocumentsSheetOpen(true)}
-            active={isDocumentsSheetOpen || !!selectedDocument}
-            badgeCount={documents.length}
+            active={isDocumentsSheetOpen || selectedDocuments.length > 0}
+            badgeCount={selectedDocuments.length > 0 ? selectedDocuments.length : documents.length}
             icon={
               <Ionicons
-                name="folder-outline"
+                name={selectedDocuments.length > 1 ? "layers-outline" : "folder-outline"}
                 size={18}
                 color={
-                  isDocumentsSheetOpen || !!selectedDocument
+                  isDocumentsSheetOpen || selectedDocuments.length > 0
                     ? Colors.primaryCyan
                     : Colors.textPrimary
                 }
@@ -252,6 +265,38 @@ export default function MainAppScreen() {
           <Ionicons name="chevron-down" size={13} color={Colors.textMuted} />
         </Pressable>
 
+        {/* Multi-document Active Context Pill */}
+        {selectedDocuments.length > 0 && (
+          <Pressable
+            onPress={() => setIsDocumentsSheetOpen(true)}
+            style={({ pressed }) => [
+              styles.contextIndicatorPill,
+              selectedDocuments.length > 1 && styles.contextIndicatorPillMulti,
+              pressed && { opacity: 0.8 },
+            ]}
+          >
+            <Ionicons
+              name={selectedDocuments.length > 1 ? 'layers-outline' : 'document-text-outline'}
+              size={12}
+              color={Colors.primaryCyan}
+            />
+            <Text style={styles.contextIndicatorText} numberOfLines={1}>
+              {selectedDocuments.length > 1
+                ? `${selectedDocuments.length} Docs`
+                : selectedDocuments[0].name}
+            </Text>
+            <Pressable
+              onPress={(e: any) => {
+                e.stopPropagation?.();
+                clearDocumentSelection();
+              }}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            >
+              <Ionicons name="close-circle" size={13} color={Colors.textMuted} />
+            </Pressable>
+          </Pressable>
+        )}
+
         <Pressable
           onPress={() => createNewChat('New Conversation')}
           style={({ pressed }) => [
@@ -274,37 +319,80 @@ export default function MainAppScreen() {
           {messages.length === 0 ? (
             /* Empty Chat State */
             <View style={styles.emptyContainer}>
-              <View style={styles.emptyIconOutline}>
+              <View
+                style={[
+                  styles.emptyIconOutline,
+                  selectedDocuments.length > 1 && styles.emptyIconOutlineMulti,
+                ]}
+              >
                 <Ionicons
-                  name="document-text-outline"
+                  name={
+                    selectedDocuments.length > 1
+                      ? 'layers-outline'
+                      : 'document-text-outline'
+                  }
                   size={32}
-                  color={Colors.textMuted}
+                  color={
+                    selectedDocuments.length > 0
+                      ? Colors.primaryCyan
+                      : Colors.textMuted
+                  }
                 />
               </View>
               <Text style={styles.emptyTitle}>
-                {selectedDocument
+                {selectedDocuments.length > 1
+                  ? `Ready to query\n${selectedDocuments.length} Selected Documents`
+                  : selectedDocument
                   ? `Ready to query\n${selectedDocument.name}`
                   : 'Upload a document\nto get started'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                {selectedDocument
+                {selectedDocuments.length > 1
+                  ? `Cross-referencing: ${selectedDocuments.map((d) => d.name).join(', ')}\nAsk comparative questions, find discrepancies, or synthesize findings across all files.`
+                  : selectedDocument
                   ? 'Ask anything about this document.\nResponses and history are stored locally only.'
                   : 'Upload a PDF, image, or document.\nYour chat is saved locally on device.'}
               </Text>
+
+              {/* Multi-document chip preview */}
+              {selectedDocuments.length > 1 && (
+                <View style={styles.emptyChipsRow}>
+                  {selectedDocuments.map((doc) => (
+                    <View key={doc.id} style={styles.emptyDocChip}>
+                      <Ionicons
+                        name="document-text-outline"
+                        size={11}
+                        color={Colors.primaryCyan}
+                      />
+                      <Text style={styles.emptyDocChipText} numberOfLines={1}>
+                        {doc.name}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
 
               <Pressable
                 onPress={() => setIsDocumentsSheetOpen(true)}
                 style={styles.emptyUploadButton}
               >
                 <Text style={styles.emptyUploadText}>
-                  {selectedDocument ? 'Switch Document' : '+ Select Document'}
+                  {selectedDocuments.length > 1
+                    ? `Manage Documents (${selectedDocuments.length} Selected)`
+                    : selectedDocument
+                    ? 'Switch Document'
+                    : '+ Select Document'}
                 </Text>
               </Pressable>
 
               {/* Suggested Prompts */}
               <View style={styles.suggestedPromptsContainer}>
-                <Text style={styles.suggestedHeader}>SUGGESTED QUERIES</Text>
-                {samplePrompts.map((prompt, idx) => (
+                <Text style={styles.suggestedHeader}>
+                  {selectedDocuments.length > 1
+                    ? 'SUGGESTED MULTI-DOCUMENT QUERIES'
+                    : 'SUGGESTED QUERIES'}
+                </Text>
+                {currentPrompts.map((prompt, idx) => (
                   <Pressable
                     key={idx}
                     onPress={() => sendMessage(prompt)}
@@ -346,7 +434,10 @@ export default function MainAppScreen() {
             onSend={sendMessage}
             disabled={isGenerating}
             selectedDocument={selectedDocument}
-            onClearContext={() => setSelectedDocument(null)}
+            selectedDocuments={selectedDocuments}
+            onClearContext={clearDocumentSelection}
+            onRemoveDocument={toggleDocumentSelection}
+            onOpenDocumentsSheet={() => setIsDocumentsSheetOpen(true)}
           />
         </View>
       </KeyboardAvoidingView>
@@ -580,5 +671,58 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Colors.textSecondary,
     textAlign: 'center',
+  },
+  contextIndicatorPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(34, 211, 238, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(34, 211, 238, 0.3)',
+    borderRadius: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    maxWidth: 160,
+  },
+  contextIndicatorPillMulti: {
+    backgroundColor: 'rgba(34, 211, 238, 0.14)',
+    borderColor: Colors.borderCyan,
+  },
+  contextIndicatorText: {
+    fontFamily: Fonts.mono,
+    fontSize: 11,
+    fontWeight: '600',
+    color: Colors.primaryCyan,
+    flexShrink: 1,
+  },
+  emptyIconOutlineMulti: {
+    borderColor: Colors.borderCyan,
+    backgroundColor: 'rgba(34, 211, 238, 0.06)',
+  },
+  emptyChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: 16,
+    maxWidth: '92%',
+  },
+  emptyDocChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    maxWidth: 180,
+  },
+  emptyDocChipText: {
+    fontFamily: Fonts.mono,
+    fontSize: 10,
+    color: Colors.textPrimary,
+    flexShrink: 1,
   },
 });

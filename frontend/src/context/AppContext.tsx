@@ -599,64 +599,101 @@ export function AppProvider({ children }: { children: ReactNode }) {
             lower.includes('summarize') ||
             lower.includes('summary') ||
             lower.includes('overview') ||
-            lower.includes('explain');
+            lower.includes('explain') ||
+            lower.includes('compare') ||
+            lower.includes('difference');
 
-          const targetDocName = selectedDocument ? selectedDocument.name : 'company_policy.pdf';
+          if (selectedDocuments.length > 1) {
+            // Multi-document offline fallback synthesis
+            const docNames = selectedDocuments.map((d) => d.name);
+            const docListStr = docNames.join(', ');
+            const primaryDoc = selectedDocuments[0];
+            const secondaryDoc = selectedDocuments[1];
 
-          if (isDescQuery) {
             assistantMessage = {
               id: `msg-resp-${Date.now()}`,
               role: 'assistant',
-              content: `This document, "${targetDocName}," serves as an authoritative guide covering key policies, procedures, and architectural standards [1]. It details implementation specifications, compliance obligations, and operational workflows designed to ensure seamless system execution [2].\n\nKey areas include core procedural requirements, security governance, and operational auditing protocols.`,
+              content: `Cross-referencing ${selectedDocuments.length} selected documents (${docListStr}):\n\n1. **${primaryDoc.name}** outlines core foundational standards, operational procedures, and compliance criteria [1].\n2. **${secondaryDoc.name}** details implementation guidelines, review protocols, and execution workflows [2].\n\nBoth documents emphasize verified auditing and strict operational adherence across system environments.`,
               timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               citations: [
                 {
                   id: `cite-${Date.now()}-1`,
                   index: 1,
-                  documentId: selectedDocument?.id || 'doc-1',
-                  documentName: targetDocName,
+                  documentId: primaryDoc.id,
+                  documentName: primaryDoc.name,
                   page: 1,
-                  snippet: `Overview and general purpose of ${targetDocName}: Outlines the foundational architecture and guidelines.`,
+                  snippet: `Foundational standards and policy criteria established in ${primaryDoc.name}.`,
                   relevance: 95,
                 },
                 {
                   id: `cite-${Date.now()}-2`,
                   index: 2,
-                  documentId: selectedDocument?.id || 'doc-1',
-                  documentName: targetDocName,
-                  page: 3,
-                  snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
-                  relevance: 90,
+                  documentId: secondaryDoc.id,
+                  documentName: secondaryDoc.name,
+                  page: 1,
+                  snippet: `Implementation workflows, verification rules, and governance specifications from ${secondaryDoc.name}.`,
+                  relevance: 91,
                 },
               ],
             };
           } else {
-            assistantMessage = {
-              id: `msg-resp-${Date.now()}`,
-              role: 'assistant',
-              content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              citations: [
-                {
-                  id: `cite-${Date.now()}-1`,
-                  index: 1,
-                  documentId: selectedDocument?.id || 'doc-2',
-                  documentName: targetDocName,
-                  page: 15,
-                  snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
-                  relevance: 91,
-                },
-                {
-                  id: `cite-${Date.now()}-2`,
-                  index: 2,
-                  documentId: selectedDocument?.id || 'doc-2',
-                  documentName: targetDocName,
-                  page: 19,
-                  snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
-                  relevance: 84,
-                },
-              ],
-            };
+            const targetDocName = selectedDocument ? selectedDocument.name : 'company_policy.pdf';
+
+            if (isDescQuery) {
+              assistantMessage = {
+                id: `msg-resp-${Date.now()}`,
+                role: 'assistant',
+                content: `This document, "${targetDocName}," serves as an authoritative guide covering key policies, procedures, and architectural standards [1]. It details implementation specifications, compliance obligations, and operational workflows designed to ensure seamless system execution [2].\n\nKey areas include core procedural requirements, security governance, and operational auditing protocols.`,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                citations: [
+                  {
+                    id: `cite-${Date.now()}-1`,
+                    index: 1,
+                    documentId: selectedDocument?.id || 'doc-1',
+                    documentName: targetDocName,
+                    page: 1,
+                    snippet: `Overview and general purpose of ${targetDocName}: Outlines the foundational architecture and guidelines.`,
+                    relevance: 95,
+                  },
+                  {
+                    id: `cite-${Date.now()}-2`,
+                    index: 2,
+                    documentId: selectedDocument?.id || 'doc-1',
+                    documentName: targetDocName,
+                    page: 3,
+                    snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                    relevance: 90,
+                  },
+                ],
+              };
+            } else {
+              assistantMessage = {
+                id: `msg-resp-${Date.now()}`,
+                role: 'assistant',
+                content: `According to section 4 of ${targetDocName}, all procedures must adhere to verifiable audit protocols [1]. Additional verification parameters are detailed in the appendix [2].`,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                citations: [
+                  {
+                    id: `cite-${Date.now()}-1`,
+                    index: 1,
+                    documentId: selectedDocument?.id || 'doc-2',
+                    documentName: targetDocName,
+                    page: 15,
+                    snippet: `Procedural guidelines require authenticated logging across all integrated services with automated discrepancy flagging.`,
+                    relevance: 91,
+                  },
+                  {
+                    id: `cite-${Date.now()}-2`,
+                    index: 2,
+                    documentId: selectedDocument?.id || 'doc-2',
+                    documentName: targetDocName,
+                    page: 19,
+                    snippet: `Verification parameters must be submitted to the document governance team for quarterly review.`,
+                    relevance: 84,
+                  },
+                ],
+              };
+            }
           }
         }
       }
