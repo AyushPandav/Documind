@@ -21,6 +21,7 @@ import { ChatInput } from '@/components/ChatInput';
 import { SourceSheet } from '@/components/SourceSheet';
 import { DocumentsSheet } from '@/components/DocumentsSheet';
 import { ChatsSheet } from '@/components/ChatsSheet';
+import { RelatednessSheet } from '@/components/RelatednessSheet';
 import { CitationSource } from '@/types';
 
 export default function MainAppScreen() {
@@ -32,11 +33,17 @@ export default function MainAppScreen() {
     logout,
     documents,
     selectedDocument,
+    selectedDocuments,
+    selectedDocumentIds,
     setSelectedDocument,
+    toggleDocumentSelection,
+    selectAllDocuments,
+    clearDocumentSelection,
     isUploading,
     uploadProgress,
     uploadingDocName,
     pickAndUploadDocument,
+    pickAndUploadImages,
     sessions,
     activeSessionId,
     activeSession,
@@ -52,6 +59,11 @@ export default function MainAppScreen() {
     setIsDocumentsSheetOpen,
     isChatHistorySheetOpen,
     setIsChatHistorySheetOpen,
+    relatednessResult,
+    isAnalyzingRelatedness,
+    isRelatednessSheetOpen,
+    setIsRelatednessSheetOpen,
+    analyzeRelatedness,
     activeCitationSource,
     activeCitationList,
     isSourceSheetOpen,
@@ -124,6 +136,29 @@ export default function MainAppScreen() {
               />
             }
             accessibilityLabel="Open local chat history"
+          />
+
+          {/* Cross-Document Correlation / Relatedness Button */}
+          <IconButton
+            onPress={() => {
+              setIsRelatednessSheetOpen(true);
+            }}
+            active={isRelatednessSheetOpen || (relatednessResult?.is_related ?? false)}
+            badgeCount={documents.length >= 2 ? documents.length : undefined}
+            icon={
+              <Ionicons
+                name="git-network-outline"
+                size={18}
+                color={
+                  isRelatednessSheetOpen
+                    ? Colors.primaryCyan
+                    : documents.length >= 2
+                    ? '#38BDF8'
+                    : Colors.textPrimary
+                }
+              />
+            }
+            accessibilityLabel="Check cross-document relatedness"
           />
 
           {/* Documents Drawer Button */}
@@ -344,11 +379,30 @@ export default function MainAppScreen() {
         onClose={() => setIsDocumentsSheetOpen(false)}
         documents={documents}
         selectedDocument={selectedDocument}
+        selectedDocuments={selectedDocuments}
         onSelectDocument={setSelectedDocument}
+        onToggleSelectDocument={toggleDocumentSelection}
+        onSelectAllDocuments={selectAllDocuments}
+        onClearDocumentSelection={clearDocumentSelection}
         onUploadPress={pickAndUploadDocument}
+        onUploadImagesPress={pickAndUploadImages}
         isUploading={isUploading}
         uploadProgress={uploadProgress}
         uploadingDocName={uploadingDocName}
+        onAnalyzeRelatedness={(docIds) => {
+          analyzeRelatedness(docIds);
+          setIsRelatednessSheetOpen(true);
+        }}
+      />
+
+      {/* Cross-Document Correlation & Relatedness Sheet */}
+      <RelatednessSheet
+        visible={isRelatednessSheetOpen}
+        onClose={() => setIsRelatednessSheetOpen(false)}
+        result={relatednessResult}
+        loading={isAnalyzingRelatedness}
+        onRefresh={() => analyzeRelatedness()}
+        onSelectQueryContext={(prompt) => sendMessage(prompt)}
       />
     </SafeAreaView>
   );

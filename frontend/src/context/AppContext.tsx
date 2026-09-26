@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import { DocumentItem, ChatMessage, CitationSource, AuthUser, ChatSession } from '@/types';
 import { INITIAL_DOCUMENTS, INITIAL_MESSAGES, MOCK_KNOWLEDGE_BASE } from '@/data/mockData';
 import {
@@ -8,6 +9,8 @@ import {
   uploadDocumentToBackend,
   sendQueryToBackend,
   performFheSearch,
+  checkDocumentsRelatedness,
+  DocumentRelatednessResult,
 } from '@/services/api';
 import {
   getLocalChatSessions,
@@ -30,14 +33,27 @@ interface AppContextType {
   // Backend connection
   isBackendConnected: boolean;
 
-  // Documents
+  // Documents & Multi-Selection
   documents: DocumentItem[];
   selectedDocument: DocumentItem | null;
+  selectedDocuments: DocumentItem[];
+  selectedDocumentIds: string[];
   setSelectedDocument: (doc: DocumentItem | null) => void;
+  toggleDocumentSelection: (doc: string | DocumentItem) => void;
+  selectAllDocuments: () => void;
+  clearDocumentSelection: () => void;
   isUploading: boolean;
   uploadProgress: number;
   uploadingDocName: string | null;
   pickAndUploadDocument: () => Promise<void>;
+  pickAndUploadImages: () => Promise<void>;
+
+  // Cross-Document Correlation & Relatedness
+  relatednessResult: DocumentRelatednessResult | null;
+  isAnalyzingRelatedness: boolean;
+  isRelatednessSheetOpen: boolean;
+  setIsRelatednessSheetOpen: (open: boolean) => void;
+  analyzeRelatedness: (docIds?: string[]) => Promise<DocumentRelatednessResult | null>;
 
   // Chat & Local Persistence
   sessions: ChatSession[];
@@ -76,10 +92,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [documents, setDocuments] = useState<DocumentItem[]>(INITIAL_DOCUMENTS);
-  const [selectedDocument, setSelectedDocument] = useState<DocumentItem | null>(null);
+  
+  // Multi-document selection state
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadingDocName, setUploadingDocName] = useState<string | null>(null);
+
+  // Cross-Document Correlation state (only triggered after uploading or explicit manual request)
+  const [relatednessResult, setRelatednessResult] = useState<DocumentRelatednessResult | null>(null);
+  const [isAnalyzingRelatedness, setIsAnalyzingRelatedness] = useState(false);
+  const [isRelatednessSheetOpen, setIsRelatednessSheetOpen] = useState(false);
 
   // Chat local persistence states
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -93,6 +117,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [isSourceSheetOpen, setIsSourceSheetOpen] = useState(false);
   const [activeCitationSource, setActiveCitationSource] = useState<CitationSource | null>(null);
   const [activeCitationList, setActiveCitationList] = useState<CitationSource[]>([]);
+
+  // Computed multi-selected documents
+  const selectedDocuments = documents.filter((d) => selectedDocumentIds.includes(d.id));
+  const selectedDocument = selectedDocuments[0] || null;
+
+  const setSelectedDocument = (doc: DocumentItem | null) => {
+    if (doc) {
+      setSelectedDocumentIds([doc.id]);
+    } else {
+      setSelectedDocumentIds([]);
+    }
+  };
+
+  const toggleDocumentSelection = (docOrId: string | DocumentItem) => {
+    const docId = typeof docOrId === 'string' ? docOrId : docOrId.id;
+    setSelectedDocumentIds((prev) =>
+      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
+    );
+  };
+
+  const selectAllDocuments = () => {
+    setSelectedDocumentIds(documents.map((d) => d.id));
+  };
+
+  const clearDocumentSelection = () => {
+    setSelectedDocumentIds([]);
+  };
 
   // 1. Initialize local chat sessions and load stored messages on boot
   useEffect(() => {
@@ -166,10 +217,101 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const analyzeRelatedness = async (docIds?: string[]): Promise<DocumentRelatednessResult | null> => {
+    setIsAnalyzingRelatedness(true);
+    try {
+      const targetIds = docIds && docIds.length > 0 ? docIds : (selectedDocumentIds.length > 1 ? selectedDocumentIds : undefined);
+      const res = await checkDocumentsRelatedness(targetIds);
+      if (res) {
+        setRelatednessResult(res);
+      }
+      setIsAnalyzingRelatedness(false);
+      return res;
+    } catch (err) {
+      console.log('[AppContext] Error analyzing relatedness:', err);
+      setIsAnalyzingRelatedness(false);
+      return null;
+    }
+  };
+
+  // Helper to upload any batch of assets (from documents or images)
+  const uploadAssetList = async (
+    assets: Array<{ uri: string; name?: string; mimeType?: string; size?: number }>
+  ) => {
+    const totalFiles = assets.length;
+    setIsUploading(true);
+    setUploadingDocName(totalFiles > 1 ? `${totalFiles} documents` : (assets[0].name || 'document'));
+    setUploadProgress(15);
+
+    const uploadedDocs: DocumentItem[] = [];
+
+    for (let i = 0; i < totalFiles; i++) {
+      const asset = assets[i];
+      setUploadingDocName(asset.name || `file_${i + 1}`);
+      setUploadProgress(Math.round(((i + 0.3) / totalFiles) * 85));
+
+      const backendDoc = await uploadDocumentToBackend(
+        asset.uri,
+        asset.name || `upload_${Date.now()}_${i}`,
+        asset.mimeType || 'application/octet-stream'
+      );
+
+      if (backendDoc) {
+        uploadedDocs.push(backendDoc);
+      } else {
+        const fallbackDoc: DocumentItem = {
+          id: `doc-${Date.now()}-${i}`,
+          name: asset.name || `document_${i + 1}`,
+          uri: asset.uri,
+          size: asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.2 MB',
+          pages: 1,
+          status: 'INDEXED',
+          uploadedAt: 'Just now',
+        };
+        uploadedDocs.push(fallbackDoc);
+      }
+
+      setUploadProgress(Math.round(((i + 1) / totalFiles) * 95));
+    }
+
+    setUploadProgress(100);
+    setDocuments((prev) => [...uploadedDocs, ...prev]);
+
+    // Automatically select the newly uploaded documents
+    const newDocIds = uploadedDocs.map((d) => d.id);
+    setSelectedDocumentIds(newDocIds);
+
+    setTimeout(() => {
+      setIsUploading(false);
+      setUploadProgress(0);
+      setUploadingDocName(null);
+    }, 600);
+
+    // AUTOMATIC CORRELATION: Triggered ONLY after uploading multiple documents (totalFiles > 1)
+    if (totalFiles > 1 && uploadedDocs.length > 1) {
+      setTimeout(async () => {
+        await analyzeRelatedness(uploadedDocs.map((d) => d.id));
+        setIsRelatednessSheetOpen(true);
+      }, 1200);
+    }
+  };
+
+  // 1. Pick and upload files (PDF, DOCX, XLSX, TXT, CSV, etc.)
   const pickAndUploadDocument = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
+        type: [
+          'application/pdf',
+          'application/msword',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'application/vnd.ms-excel',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'application/vnd.ms-powerpoint',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          'text/*',
+          'image/*',
+          '*/*'
+        ],
         multiple: true,
         copyToCacheDirectory: true,
       });
@@ -178,56 +320,37 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const totalFiles = result.assets.length;
-      setIsUploading(true);
-      setUploadingDocName(totalFiles > 1 ? `${totalFiles} documents` : (result.assets[0].name || 'document'));
-      setUploadProgress(15);
-
-      const uploadedDocs: DocumentItem[] = [];
-
-      for (let i = 0; i < totalFiles; i++) {
-        const asset = result.assets[i];
-        setUploadingDocName(asset.name || `file_${i + 1}`);
-        setUploadProgress(Math.round(((i + 0.3) / totalFiles) * 85));
-
-        const backendDoc = await uploadDocumentToBackend(
-          asset.uri,
-          asset.name || `upload_${Date.now()}_${i}`,
-          asset.mimeType || 'application/octet-stream'
-        );
-
-        if (backendDoc) {
-          uploadedDocs.push(backendDoc);
-        } else {
-          const fallbackDoc: DocumentItem = {
-            id: `doc-${Date.now()}-${i}`,
-            name: asset.name || `document_${i + 1}`,
-            uri: asset.uri,
-            size: asset.size ? `${(asset.size / (1024 * 1024)).toFixed(1)} MB` : '1.2 MB',
-            pages: 1,
-            status: 'INDEXED',
-            uploadedAt: 'Just now',
-          };
-          uploadedDocs.push(fallbackDoc);
-        }
-
-        setUploadProgress(Math.round(((i + 1) / totalFiles) * 95));
-      }
-
-      setUploadProgress(100);
-      setDocuments((prev) => [...uploadedDocs, ...prev]);
-
-      if (uploadedDocs.length > 0) {
-        setSelectedDocument(uploadedDocs[0]);
-      }
-
-      setTimeout(() => {
-        setIsUploading(false);
-        setUploadProgress(0);
-        setUploadingDocName(null);
-      }, 600);
+      await uploadAssetList(result.assets);
     } catch (err) {
       console.error('Error selecting documents:', err);
+      setIsUploading(false);
+      setUploadingDocName(null);
+    }
+  };
+
+  // 2. Pick and upload images/photos (Guaranteed multi-select with checkmarks on Android/iOS)
+  const pickAndUploadImages = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsMultipleSelection: true,
+        quality: 0.9,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const mappedAssets = result.assets.map((asset, idx) => ({
+        uri: asset.uri,
+        name: asset.fileName || `photo_${Date.now()}_${idx + 1}.jpg`,
+        mimeType: asset.mimeType || 'image/jpeg',
+        size: asset.fileSize || undefined,
+      }));
+
+      await uploadAssetList(mappedAssets);
+    } catch (err) {
+      console.error('Error selecting images:', err);
       setIsUploading(false);
       setUploadingDocName(null);
     }
@@ -399,11 +522,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setIsGenerating(true);
     await persistMessagesLocally(currentSessionId, messagesWithUser, text.trim());
 
+    // Context filter: single or multi-doc filter
+    const docContext = selectedDocuments.length > 0
+      ? selectedDocuments.map((d) => d.name).join(', ')
+      : null;
+
     try {
       // 1. Real RAG execution via FastAPI Gateway
       const backendResult = await sendQueryToBackend(
         text.trim(),
-        selectedDocument ? selectedDocument.name : null,
+        docContext,
         currentSessionId
       );
 
@@ -570,11 +698,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         isBackendConnected,
         documents,
         selectedDocument,
+        selectedDocuments,
+        selectedDocumentIds,
         setSelectedDocument,
+        toggleDocumentSelection,
+        selectAllDocuments,
+        clearDocumentSelection,
         isUploading,
         uploadProgress,
         uploadingDocName,
         pickAndUploadDocument,
+        pickAndUploadImages,
+        relatednessResult,
+        isAnalyzingRelatedness,
+        isRelatednessSheetOpen,
+        setIsRelatednessSheetOpen,
+        analyzeRelatedness,
         sessions,
         activeSessionId,
         activeSession,

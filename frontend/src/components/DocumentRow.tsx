@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { DocumentItem } from '@/types';
 import { Colors, Fonts } from '@/constants/theme';
 import { StatusBadge } from './StatusBadge';
@@ -23,14 +24,15 @@ export function DocumentRow({
         isSelected && styles.selectedContainer,
         pressed && styles.pressedContainer,
       ]}
-      accessibilityRole="button"
+      accessibilityRole="checkbox"
       accessibilityState={{ selected: isSelected }}
     >
       <View style={styles.contentRow}>
-        <View style={styles.indicatorContainer}>
-          <Text style={[styles.indicator, isSelected && styles.activeIndicator]}>
-            {isSelected ? '▸' : '•'}
-          </Text>
+        {/* Multi-select Checkbox */}
+        <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+          {isSelected ? (
+            <Ionicons name="checkmark" size={13} color="#0B101B" />
+          ) : null}
         </View>
 
         <View style={styles.infoContainer}>
@@ -76,7 +78,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.02)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.07)',
-    borderRadius: 8,
+    borderRadius: 10,
     padding: 12,
     marginVertical: 4,
     position: 'relative',
@@ -92,21 +94,21 @@ const styles = StyleSheet.create({
   contentRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 12,
   },
-  indicatorContainer: {
-    width: 14,
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  indicator: {
-    fontFamily: Fonts.mono,
-    fontSize: 14,
-    color: Colors.textMuted,
-  },
-  activeIndicator: {
-    color: Colors.primaryCyan,
-    fontWeight: '700',
+  checkboxSelected: {
+    backgroundColor: Colors.primaryCyan,
+    borderColor: Colors.primaryCyan,
   },
   infoContainer: {
     flex: 1,

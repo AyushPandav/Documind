@@ -44,14 +44,18 @@ class HybridRetriever:
             logger.warning("[Retriever] No chunks available for retrieval — corpus is empty")
             return []
 
-        # Apply document filter if specified
+        # Apply document filter if specified (supports single doc or comma-separated multiple docs)
         if doc_filter:
+            filter_terms = [t.strip().lower() for t in doc_filter.split(",") if t.strip()]
             filtered_chunks = [
                 c for c in chunks
-                if c.get("doc_name") == doc_filter
-                or c.get("doc_id") == doc_filter
-                or doc_filter.lower() in c.get("doc_name", "").lower()
-                or c.get("doc_name", "").lower() in doc_filter.lower()
+                if any(
+                    term == c.get("doc_name", "").lower()
+                    or term == c.get("doc_id", "").lower()
+                    or term in c.get("doc_name", "").lower()
+                    or c.get("doc_name", "").lower() in term
+                    for term in filter_terms
+                )
             ]
             if filtered_chunks:
                 logger.info(f"[Retriever] Doc filter '{doc_filter}': {len(filtered_chunks)}/{len(chunks)} chunks selected")

@@ -345,3 +345,50 @@ export async function fetchDocumentForensics(docId: string): Promise<any | null>
     return null;
   }
 }
+
+export interface PairwiseCorrelation {
+  doc_a: string;
+  doc_b: string;
+  composite_score: number;
+  similarity_percentage: number;
+  semantic_score: number;
+  lexical_score: number;
+  visual_score: number | null;
+  shared_keywords: string[];
+  relationship: string;
+}
+
+export interface DocumentRelatednessResult {
+  is_related: boolean;
+  similarity_percentage: number;
+  relationship_label: string;
+  relationship_explanation: string;
+  document_count: number;
+  shared_themes: string[];
+  doc_summaries: Record<string, string>;
+  keyword_fingerprints: Record<string, string[]>;
+  pairwise_similarity: PairwiseCorrelation[];
+  recommendation: string;
+}
+
+/**
+ * Checks whether multiple uploaded documents are topically or visually related.
+ * Computes dense semantic vectors, CLIP multimodal similarity, and TF-IDF Jaccard overlap,
+ * with AI relationship narrative synthesis.
+ */
+export async function checkDocumentsRelatedness(
+  docIds?: string[]
+): Promise<DocumentRelatednessResult | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/documents/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(docIds && docIds.length > 0 ? { doc_ids: docIds } : {}),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.log('[DocuMind API] Relatedness analysis error:', err);
+    return null;
+  }
+}
